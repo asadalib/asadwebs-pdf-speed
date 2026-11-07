@@ -1,0 +1,1 @@
+<resources><style name="Theme.PDFSpeed" parent="android:Theme.Material.Light.NoActionBar"><item name="android:windowBackground">@android:color/white</item></style></resources>

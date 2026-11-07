@@ -1,0 +1,33 @@
+name: Build PDF Speed APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build release APK (unsigned)
+        run: ./gradlew assembleRelease --stacktrace
+      - name: Decode upload keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > $RUNNER_TEMP/upload.keystore
+      - name: Align + sign with upload key
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          UNSIGNED=app/build/outputs/apk/release/app-release-unsigned.apk
+          $BT/zipalign -f 4 "$UNSIGNED" app-aligned.apk
+          $BT/apksigner sign --ks $RUNNER_TEMP/upload.keystore --ks-key-alias asadwebs \
+            --ks-pass pass:${{ secrets.KEYSTORE_PASSWORD }} --key-pass pass:${{ secrets.KEYSTORE_PASSWORD }} \
+            --out PDF-Speed.apk app-aligned.apk
+          $BT/apksigner verify --print-certs PDF-Speed.apk
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-speed-apk
+          path: PDF-Speed.apk
