@@ -92,13 +92,62 @@ object Imaging {
         consider(blobQuad(lum, dw, dh, true))
         consider(edgeQuad(lum, dw, dh))
 
-        val quad = best?.first ?: return null
+        val rawQuad = best?.first ?: return null
+        val quad = refineQuadPx(lum, dw, dh, rawQuad)
         var cx = 0f; var cy = 0f
         for (p in quad) { cx += p.x; cy += p.y }
         cx /= 4; cy /= 4
         return quad.map { p ->
-            PointF((p.x + (cx - p.x) * 0.01f) / dw, (p.y + (cy - p.y) * 0.01f) / dh)
+            PointF((p.x + (cx - p.x) * 0.015f) / dw, (p.y + (cy - p.y) * 0.015f) / dh)
         }.toTypedArray()
+    }
+
+    /** Snaps each quad edge onto the strongest nearby brightness step (the
+     *  paper's true edge), searching ±6% along the edge normal at three
+     *  points per edge and shifting by the median winning offset. Fixes the
+     *  "quad floats a few % off the page" overshoot on busy backgrounds. */
+    private fun refineQuadPx(lum: FloatArray, w: Int, h: Int, quad: Array<PointF>): Array<PointF> {
+        fun sample(cx: Float, cy: Float): Float {
+            val x = cx.toInt().coerceIn(0, w - 1); val y = cy.toInt().coerceIn(0, h - 1)
+            return lum[y * w + x]
+        }
+        fun patchAvg(cx: Float, cy: Float): Float {
+            var acc = 0f; var cnt = 0
+            for (dy in -2..2) for (dx in -2..2) { acc += sample(cx + dx, cy + dy); cnt++ }
+            return acc / cnt
+        }
+        val q = Array(4) { PointF(quad[it].x, quad[it].y) }
+        var ccx = 0f; var ccy = 0f
+        for (p in q) { ccx += p.x; ccy += p.y }
+        ccx /= 4; ccy /= 4
+        val win = 0.06f * min(w, h)
+        for (e in 0 until 4) {
+            val a = q[e]; val b = q[(e + 1) % 4]
+            val ex = b.x - a.x; val ey = b.y - a.y
+            val len = max(1f, hypot(ex, ey))
+            var nx = -ey / len; var ny = ex / len
+            val mx = (a.x + b.x) / 2; val my = (a.y + b.y) / 2
+            if ((mx + nx - ccx) * nx + (my + ny - ccy) * ny < 0) { nx = -nx; ny = -ny }
+            val offsets = ArrayList<Float>()
+            for (frac in floatArrayOf(0.3f, 0.5f, 0.7f)) {
+                val px0 = a.x + ex * frac; val py0 = a.y + ey * frac
+                var bestT = 0f; var bestG = -1f
+                var t = -win
+                while (t <= win) {
+                    val g = abs(patchAvg(px0 + nx * (t + 2), py0 + ny * (t + 2)) - patchAvg(px0 + nx * (t - 2), py0 + ny * (t - 2)))
+                    if (g > bestG) { bestG = g; bestT = t }
+                    t += 2f
+                }
+                if (bestG > 6f) offsets.add(bestT)
+            }
+            if (offsets.isNotEmpty()) {
+                offsets.sort()
+                val shift = offsets[offsets.size / 2]
+                a.x += nx * shift; a.y += ny * shift
+                b.x += nx * shift; b.y += ny * shift
+            }
+        }
+        return q
     }
 
     /** Validates an ordered quad (analysis px) and returns it with a score, or null. */

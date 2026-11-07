@@ -2,6 +2,7 @@ package com.asadwebs.pdfspeed.scan
 
 import android.graphics.Bitmap
 import android.graphics.PointF
+import android.widget.Toast
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -61,10 +62,16 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
 
     LaunchedEffect(imageFile) {
         withContext(Dispatchers.IO) {
-            val bmp = Imaging.loadOriented(imageFile)
-            original = bmp
-            master = Imaging.downscaleTo(bmp, 3000)
-            val found = Imaging.detectCorners(bmp)
+            // Memory diet: ONE working bitmap at 3000px serves display,
+            // detection, rotation and the final warp. Keeping the full-res
+            // camera bitmap alive alongside it was the likely cause of the
+            // app closing when a page was processed (Next page / Done).
+            val raw = Imaging.loadOriented(imageFile)
+            val m = Imaging.downscaleTo(raw, 3000)
+            if (m !== raw) raw.recycle()
+            original = m
+            master = m
+            val found = Imaging.detectCorners(m)
             corners = found ?: defaultCorners()
             detected = found != null
         }
@@ -88,7 +95,7 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
             withContext(Dispatchers.IO) {
                 val r = Imaging.rotate(bmp, degCW)
                 original = r
-                master = Imaging.downscaleTo(r, 3000)
+                master = r
                 val found = Imaging.detectCorners(r)
                 corners = found ?: defaultCorners()
                 detected = found != null
@@ -104,14 +111,17 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
         val c = corners ?: return
         busy = true
         scope.launch {
-            val outFile = withContext(Dispatchers.IO) {
-                val done = Imaging.applyFilter(Imaging.warp(bmp, c), filter)
-                val f = File(context.cacheDir, "page_${System.currentTimeMillis()}.jpg")
-                Imaging.saveJpeg(done, f)
-                f
-            }
+            val outFile = try {
+                withContext(Dispatchers.IO) {
+                    val done = Imaging.applyFilter(Imaging.warp(bmp, c), filter)
+                    val f = File(context.cacheDir, "page_${System.currentTimeMillis()}.jpg")
+                    Imaging.saveJpeg(done, f)
+                    f
+                }
+            } catch (t: Throwable) { null }
             busy = false
-            deliver(outFile)
+            if (outFile != null) deliver(outFile)
+            else Toast.makeText(context, "That page could not be processed. Please retake it a little closer.", Toast.LENGTH_LONG).show()
         }
     }
 
