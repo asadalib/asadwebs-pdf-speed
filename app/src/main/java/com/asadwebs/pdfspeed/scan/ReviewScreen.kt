@@ -36,10 +36,11 @@ import java.io.File
  *  detected corners) and Preview (warped + filtered result). Done re-runs
  *  the warp + filter at full resolution and hands back the finished page. */
 @Composable
-fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onRetake: () -> Unit) {
+fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit, onRetake: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var original by remember { mutableStateOf<Bitmap?>(null) }
+    var master by remember { mutableStateOf<Bitmap?>(null) }
     var corners by remember { mutableStateOf<Array<PointF>?>(null) }
     var detected by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf(Imaging.ScanFilter.MAGIC) }
@@ -47,10 +48,27 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onRetake: () -> Unit) 
     var mode by remember { mutableStateOf("adjust") }
     var busy by remember { mutableStateOf(false) }
 
+    fun processPage(deliver: (File) -> Unit) {
+        val bmp = master ?: original ?: return
+        val c = corners ?: return
+        busy = true
+        scope.launch {
+            val outFile = withContext(Dispatchers.IO) {
+                val done = Imaging.applyFilter(Imaging.warp(bmp, c), filter)
+                val f = File(context.cacheDir, "page_${System.currentTimeMillis()}.jpg")
+                Imaging.saveJpeg(done, f)
+                f
+            }
+            busy = false
+            deliver(outFile)
+        }
+    }
+
     LaunchedEffect(imageFile) {
         withContext(Dispatchers.IO) {
             val bmp = Imaging.loadOriented(imageFile)
             original = bmp
+            master = Imaging.downscaleTo(bmp, 3000)
             val found = Imaging.detectCorners(bmp)
             corners = found ?: arrayOf(
                 PointF(0.03f, 0.03f), PointF(0.97f, 0.03f),
@@ -66,7 +84,7 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onRetake: () -> Unit) 
         val c = corners ?: return@LaunchedEffect
         preview = null
         withContext(Dispatchers.IO) {
-            val small = Bitmap.createScaledBitmap(bmp, 700, (bmp.height * 700f / bmp.width).toInt().coerceAtLeast(1), true)
+            val small = Imaging.downscaleTo(master ?: bmp, 1400)
             preview = Imaging.applyFilter(Imaging.warp(small, c), filter)
         }
     }
@@ -75,22 +93,15 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onRetake: () -> Unit) 
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onRetake, enabled = !busy) { Text("Retake", color = Color.White) }
             Text("Review", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            OutlinedButton(
+                onClick = { processPage { onNext(it) } },
+                enabled = !busy && original != null,
+                shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+            ) { Text("Next page") }
+            Spacer(Modifier.width(8.dp))
             Button(
-                onClick = {
-                    val bmp = original ?: return@Button
-                    val c = corners ?: return@Button
-                    busy = true
-                    scope.launch {
-                        val outFile = withContext(Dispatchers.IO) {
-                            val done = Imaging.applyFilter(Imaging.warp(bmp, c), filter)
-                            val f = File(context.cacheDir, "page_${System.currentTimeMillis()}.jpg")
-                            Imaging.saveJpeg(done, f)
-                            f
-                        }
-                        busy = false
-                        onDone(outFile)
-                    }
-                },
+                onClick = { processPage { onDone(it) } },
                 enabled = !busy && original != null,
                 shape = RoundedCornerShape(999.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)

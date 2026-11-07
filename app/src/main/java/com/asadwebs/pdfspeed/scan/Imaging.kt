@@ -35,7 +35,15 @@ object Imaging {
         else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
     }
 
-    fun saveJpeg(bmp: Bitmap, file: File, quality: Int = 88) {
+    /** Downscales so the long edge is at most maxSide (returns src if already smaller). */
+    fun downscaleTo(src: Bitmap, maxSide: Int): Bitmap {
+        val longest = max(src.width, src.height)
+        if (longest <= maxSide) return src
+        val scale = maxSide.toFloat() / longest
+        return Bitmap.createScaledBitmap(src, (src.width * scale).toInt().coerceAtLeast(1), (src.height * scale).toInt().coerceAtLeast(1), true)
+    }
+
+    fun saveJpeg(bmp: Bitmap, file: File, quality: Int = 92) {
         FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }
     }
 

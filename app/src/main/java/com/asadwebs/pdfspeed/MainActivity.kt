@@ -144,6 +144,20 @@ fun AppRoot() {
                                 nav.navigate("doc/$pendingTarget") { popUpTo("home") { inclusive = false } }
                             }
                         },
+                        onNext = { processed ->
+                            val targetId = if (pendingTarget == "new") {
+                                val name = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
+                                val doc = store.addPageToNewDoc(processed, name)
+                                pendingTarget = doc.id
+                                doc.id
+                            } else {
+                                store.addPage(pendingTarget, processed)
+                                pendingTarget
+                            }
+                            refresh()
+                            pendingCapture = null
+                            nav.navigate("scanner/$targetId") { popUpTo("home") { inclusive = false } }
+                        },
                         onRetake = { nav.popBackStack() }
                     )
                 }
@@ -151,7 +165,19 @@ fun AppRoot() {
             composable("doc/{docId}") { entry ->
                 val docId = entry.arguments?.getString("docId")
                 val doc = docs.firstOrNull { it.id == docId }
-                if (doc != null) DocScreen(doc, store, { refresh() }, nav) else LaunchedEffect(Unit) { nav.popBackStack() }
+                if (doc != null) {
+                    DocScreen(doc, store, { refresh() }, nav)
+                } else {
+                    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
+                        Text("This document could not be opened.", style = MaterialTheme.typography.titleLarge)
+                        Spacer(Modifier.height(8.dp))
+                        Text("It may still be saving. Your scans are in the library.", color = Muted)
+                        Spacer(Modifier.height(16.dp))
+                        Button(onClick = { nav.navigate("library") { popUpTo("home") { inclusive = false } } },
+                            shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) { Text("Go to library") }
+                    }
+                }
             }
         }
         if (showBar) BottomBar(route, nav, Modifier.align(Alignment.BottomCenter))
@@ -371,7 +397,7 @@ fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavControll
         }
         items(doc.pages) { path ->
             Card(shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = CardBg), modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-                Thumb(path, null, 300.dp, Modifier.fillMaxWidth())
+                Thumb(path, null, 300.dp, Modifier.fillMaxWidth(), sample = 1)
             }
         }
         item {
@@ -404,11 +430,11 @@ fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavControll
 }
 
 @Composable
-fun Thumb(path: String?, width: androidx.compose.ui.unit.Dp?, height: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
+fun Thumb(path: String?, width: androidx.compose.ui.unit.Dp?, height: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier, sample: Int = 4) {
     val bmp = remember(path) {
         path?.let {
             try {
-                val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
                 BitmapFactory.decodeFile(it, opts)?.asImageBitmap()
             } catch (e: Exception) { null }
         }
