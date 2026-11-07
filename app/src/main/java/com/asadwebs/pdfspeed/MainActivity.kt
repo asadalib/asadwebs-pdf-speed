@@ -34,6 +34,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.asadwebs.pdfspeed.data.Doc
 import com.asadwebs.pdfspeed.data.DocStore
+import com.asadwebs.pdfspeed.scan.ReviewScreen
 import com.asadwebs.pdfspeed.scan.ScannerScreen
 import com.asadwebs.pdfspeed.ui.*
 import java.io.File
@@ -57,6 +58,8 @@ fun AppRoot() {
     val store = remember { DocStore(context) }
     var docs by remember { mutableStateOf(store.load()) }
     fun refresh() { docs = store.load() }
+    var pendingCapture by remember { mutableStateOf<java.io.File?>(null) }
+    var pendingTarget by remember { mutableStateOf("new") }
     val nav = rememberNavController()
     val route = nav.currentBackStackEntryAsState().value?.destination?.route
     val showBar = route in listOf("home", "library", "tools", "me")
@@ -71,20 +74,37 @@ fun AppRoot() {
                 val docId = entry.arguments?.getString("docId") ?: "new"
                 ScannerScreen(
                     onCaptured = { file ->
-                        if (docId == "new") {
-                            val name = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
-                            val doc = store.addPageToNewDoc(file, name)
-                            refresh()
-                            nav.popBackStack()
-                            nav.navigate("doc/${doc.id}")
-                        } else {
-                            store.addPage(docId, file)
-                            refresh()
-                            nav.popBackStack()
-                        }
+                        pendingCapture = file
+                        pendingTarget = docId
+                        nav.navigate("review")
                     },
                     onClose = { nav.popBackStack() }
                 )
+            }
+            composable("review") {
+                val file = pendingCapture
+                if (file == null) {
+                    LaunchedEffect(Unit) { nav.popBackStack() }
+                } else {
+                    ReviewScreen(
+                        imageFile = file,
+                        onDone = { processed ->
+                            if (pendingTarget == "new") {
+                                val name = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
+                                val doc = store.addPageToNewDoc(processed, name)
+                                refresh()
+                                pendingCapture = null
+                                nav.navigate("doc/${doc.id}") { popUpTo("home") { inclusive = false } }
+                            } else {
+                                store.addPage(pendingTarget, processed)
+                                refresh()
+                                pendingCapture = null
+                                nav.navigate("doc/$pendingTarget") { popUpTo("home") { inclusive = false } }
+                            }
+                        },
+                        onRetake = { nav.popBackStack() }
+                    )
+                }
             }
             composable("doc/{docId}") { entry ->
                 val docId = entry.arguments?.getString("docId")
