@@ -30,7 +30,9 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.Gold
+import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.GoldInk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -74,6 +76,7 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
             val found = Imaging.detectCorners(m)
             corners = found ?: defaultCorners()
             detected = found != null
+            Trace.log("review loaded ${m.width}x${m.height}, detection=${found != null}")
         }
     }
 
@@ -109,6 +112,7 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
     fun processPage(deliver: (File) -> Unit) {
         val bmp = master ?: original ?: return
         val c = corners ?: return
+        Trace.log("processPage start filter=$filter")
         busy = true
         scope.launch {
             val outFile = try {
@@ -118,22 +122,17 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
                     Imaging.saveJpeg(done, f)
                     f
                 }
-            } catch (t: Throwable) { null }
+            } catch (t: Throwable) { Trace.log("processPage FAILED (${t.javaClass.simpleName}): ${t.message}"); null }
             busy = false
-            if (outFile != null) deliver(outFile)
+            if (outFile != null) { Trace.log("processPage done"); deliver(outFile) }
             else Toast.makeText(context, "That page could not be processed. Please retake it a little closer.", Toast.LENGTH_LONG).show()
         }
     }
 
-    // Free the big bitmaps the moment this screen goes away. Leaving them
-    // for the GC while the camera reopened underneath was part of the
-    // Next-page close: peak memory stayed high exactly when capture needed it.
-    DisposableEffect(Unit) {
-        onDispose {
-            try { preview?.recycle() } catch (e: Exception) { }
-            try { val o = original; if (o != null && !o.isRecycled) o.recycle() } catch (e: Exception) { }
-        }
-    }
+    // NOTE: bitmaps are deliberately NOT recycled here. In-flight IO work
+    // (preview warp, rotate) can still be reading them as this screen
+    // leaves; a recycle then crashes natively. They become garbage and
+    // the GC reclaims them — the 3000px diet keeps that garbage small.
 
     Column(Modifier.fillMaxSize().background(Color(0xFF141210))) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {

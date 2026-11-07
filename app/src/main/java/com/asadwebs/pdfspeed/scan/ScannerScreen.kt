@@ -44,7 +44,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.Gold
+import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.GoldInk
 import com.asadwebs.pdfspeed.ui.Ink
 import java.io.File
@@ -73,14 +75,18 @@ fun modeFilter(modeId: String): Imaging.ScanFilter = when (modeId) {
 
 private class CapHolder {
     var capture: ImageCapture? = null
+    var analysis: ImageAnalysis? = null
     @Volatile var busy: Boolean = false
     @Volatile var frozen: Boolean = false
+    @Volatile var active: Boolean = true
+    @Volatile var resumed: Boolean = false
 }
 
 private class Stab {
     var last: Array<PointF>? = null
     var since: Long = 0
     var lastRun: Long = 0
+    var hadFound: Boolean = false
 }
 
 /** CameraX scanner with live edge detection and steady-frame auto-capture.
@@ -111,6 +117,8 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
     DisposableEffect(Unit) { onDispose { analysisExecutor.shutdown() } }
 
     fun capture() {
+        if (!capHolder.active) { Trace.log("capture() ignored — scanner inactive"); return }
+        Trace.log("capture() called busy=${capHolder.busy} auto will follow")
         val cap = capHolder.capture ?: run {
             Toast.makeText(context, "Camera is starting… one moment.", Toast.LENGTH_SHORT).show()
             return
@@ -122,10 +130,12 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
         try {
         cap.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
+                Trace.log("capture saved -> review (mode=${mode.id})")
                 capHolder.frozen = true
                 onCaptured(out, mode.id)
             }
             override fun onError(exception: ImageCaptureException) {
+                Trace.log("capture ERROR ${exception.imageCaptureError}: ${exception.message}")
                 capHolder.busy = false
                 Toast.makeText(context, "Capture failed: ${exception.message}", Toast.LENGTH_SHORT).show()
             }
@@ -169,6 +179,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
+                capHolder.analysis = analysis
                 analysis.setAnalyzer(analysisExecutor) { proxy ->
                     try {
                         val now = System.currentTimeMillis()
@@ -177,6 +188,10 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                             val gray = Imaging.yuvToGray(proxy)
                             val found = if (gray != null) Imaging.detectCorners(Imaging.downscaleTo(gray, 360)) else null
                             liveCorners = found
+                            if ((found != null) != stab.hadFound) {
+                                stab.hadFound = found != null
+                                Trace.log(if (found != null) "live detection: FOUND" else "live detection: lost")
+                            }
                             if (found == null) {
                                 stab.last = null; stab.since = 0
                             } else {
@@ -186,7 +201,8 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                                 }
                                 if (stable) {
                                     if (stab.since == 0L) stab.since = now
-                                    if (autoCap && now - stab.since > 900 && !capHolder.busy) {
+                                    if (autoCap && capHolder.active && capHolder.resumed && now - stab.since > 900 && !capHolder.busy) {
+                                        Trace.log("auto-capture firing")
                                         Handler(Looper.getMainLooper()).post { capture() }
                                     }
                                 } else {
@@ -204,7 +220,9 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                 capHolder.capture = capture
                 if (torch) cam.cameraControl.enableTorch(true)
                 bound = true
+                Trace.log("camera bound OK")
             } catch (e: Exception) {
+                Trace.log("bind FAILED (${e.javaClass.simpleName}): ${e.message}")
                 bound = false
                 attempts++
                 if (attempts <= 2) {
@@ -221,14 +239,24 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
         }, ContextCompat.getMainExecutor(context))
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                capHolder.resumed = true
                 capHolder.busy = false
                 capHolder.frozen = false
                 stab.last = null; stab.since = 0
+                Trace.log("scanner ON_RESUME (bound=$bound)")
                 if (!bound) bind()
+            }
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                capHolder.resumed = false
+                Trace.log("scanner ON_PAUSE")
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            Trace.log("scanner DISPOSED")
+            capHolder.active = false
+            capHolder.resumed = false
+            try { capHolder.analysis?.clearAnalyzer() } catch (e: Exception) { }
             lifecycleOwner.lifecycle.removeObserver(observer)
             try { provider?.unbindAll() } catch (e: Exception) { }
             bound = false

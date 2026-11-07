@@ -42,6 +42,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.asadwebs.pdfspeed.data.Doc
 import com.asadwebs.pdfspeed.data.DocStore
+import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.scan.ReviewScreen
 import com.asadwebs.pdfspeed.scan.ScannerScreen
 import com.asadwebs.pdfspeed.scan.Imaging
@@ -55,6 +56,7 @@ import java.util.*
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Trace.init(applicationContext)
         // Crash capture: write the stack trace to a file so the next launch can
         // show and share it instead of dying silently. Diagnostic aid.
         val crashFile = java.io.File(getExternalFilesDir(null) ?: filesDir, "crash.txt")
@@ -116,6 +118,7 @@ fun AppRoot() {
     val nav = rememberNavController()
     val route = nav.currentBackStackEntryAsState().value?.destination?.route
     val showBar = route in listOf("home", "library", "tools", "me")
+    LaunchedEffect(route) { Trace.log("route -> $route") }
 
     Box(Modifier.fillMaxSize()) {
         NavHost(navController = nav, startDestination = "home", modifier = Modifier.fillMaxSize()) {
@@ -143,6 +146,7 @@ fun AppRoot() {
                     // into two pages; ID Card waits for the back side, then
                     // composes front+back onto a single page.
                     fun deliver(processed: java.io.File, continueScan: Boolean) {
+                        Trace.log("deliver mode=$pendingMode continue=$continueScan target=$pendingTarget")
                         fun scanName() = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
                         fun addToTarget(pageFile: java.io.File): String {
                             return if (pendingTarget == "new") {
@@ -155,6 +159,7 @@ fun AppRoot() {
                             }
                         }
                         fun finish(docId: String) {
+                            Trace.log("finish continue=$continueScan doc=$docId")
                             refresh()
                             pendingCapture = null
                             if (continueScan) nav.popBackStack()
@@ -423,6 +428,7 @@ fun ToolsScreen(nav: NavController, onScanNew: () -> Unit = {}) {
 
 @Composable
 fun MeScreen(docCount: Int) {
+    val ctx = LocalContext.current
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
         item {
             Spacer(Modifier.height(18.dp))
@@ -434,6 +440,34 @@ fun MeScreen(docCount: Int) {
                     Spacer(Modifier.height(10.dp))
                     Text("Documents in library: $docCount", color = Muted, fontSize = 13.sp)
                     Text("Version 1.0", color = Muted, fontSize = 13.sp)
+        item {
+            Spacer(Modifier.height(18.dp))
+            Kicker("Diagnostics")
+            var traceText by remember { mutableStateOf(Trace.tail(60)) }
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = CardBg), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Session log", style = MaterialTheme.typography.titleLarge)
+                    Text("Every step the app takes is recorded here — it survives even if the app is closed by the system. If anything closes unexpectedly, share this log.", color = Muted, fontSize = 12.5.sp, modifier = Modifier.padding(vertical = 6.dp))
+                    Box(Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState()).background(Color(0xFFF3EEE2), RoundedCornerShape(10.dp)).padding(10.dp)) {
+                        Text(traceText, fontSize = 10.5.sp, lineHeight = 14.sp)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "PDF Speed session log")
+                                putExtra(Intent.EXTRA_TEXT, Trace.read())
+                            }
+                            ctx.startActivity(Intent.createChooser(intent, "Share session log"))
+                        }, shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) { Text("Share log") }
+                        OutlinedButton(onClick = { traceText = Trace.tail(60) }, shape = RoundedCornerShape(999.dp)) { Text("Refresh") }
+                        TextButton(onClick = { Trace.clear(); traceText = Trace.tail(60) }) { Text("Clear") }
+                    }
+                }
+            }
+        }
                 }
             }
         }
