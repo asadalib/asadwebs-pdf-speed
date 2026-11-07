@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -29,6 +30,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -38,6 +44,9 @@ import com.asadwebs.pdfspeed.data.Doc
 import com.asadwebs.pdfspeed.data.DocStore
 import com.asadwebs.pdfspeed.scan.ReviewScreen
 import com.asadwebs.pdfspeed.scan.ScannerScreen
+import com.asadwebs.pdfspeed.scan.Imaging
+import com.asadwebs.pdfspeed.scan.modeFilter
+import android.graphics.BitmapFactory as BmpFactory
 import com.asadwebs.pdfspeed.ui.*
 import java.io.File
 import java.text.SimpleDateFormat
@@ -102,6 +111,8 @@ fun AppRoot() {
     fun refresh() { docs = store.load() }
     var pendingCapture by remember { mutableStateOf<java.io.File?>(null) }
     var pendingTarget by remember { mutableStateOf("new") }
+    var pendingMode by remember { mutableStateOf("doc") }
+    var pendingIdFront by remember { mutableStateOf<java.io.File?>(null) }
     val nav = rememberNavController()
     val route = nav.currentBackStackEntryAsState().value?.destination?.route
     val showBar = route in listOf("home", "library", "tools", "me")
@@ -115,9 +126,10 @@ fun AppRoot() {
             composable("scanner/{docId}") { entry ->
                 val docId = entry.arguments?.getString("docId") ?: "new"
                 ScannerScreen(
-                    onCaptured = { file ->
+                    onCaptured = { file, mode ->
                         pendingCapture = file
                         pendingTarget = docId
+                        pendingMode = mode
                         nav.navigate("review")
                     },
                     onClose = { nav.popBackStack() }
@@ -128,36 +140,67 @@ fun AppRoot() {
                 if (file == null) {
                     LaunchedEffect(Unit) { nav.popBackStack() }
                 } else {
-                    ReviewScreen(
-                        imageFile = file,
-                        onDone = { processed ->
-                            if (pendingTarget == "new") {
-                                val name = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
-                                val doc = store.addPageToNewDoc(processed, name)
-                                refresh()
-                                pendingCapture = null
-                                nav.navigate("doc/${doc.id}") { popUpTo("home") { inclusive = false } }
-                            } else {
-                                store.addPage(pendingTarget, processed)
-                                refresh()
-                                pendingCapture = null
-                                nav.navigate("doc/$pendingTarget") { popUpTo("home") { inclusive = false } }
-                            }
-                        },
-                        onNext = { processed ->
-                            val targetId = if (pendingTarget == "new") {
-                                val name = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
-                                val doc = store.addPageToNewDoc(processed, name)
+                    // One delivery path for every mode: Book splits the spread
+                    // into two pages; ID Card waits for the back side, then
+                    // composes front+back onto a single page.
+                    fun deliver(processed: java.io.File, continueScan: Boolean) {
+                        fun scanName() = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
+                        fun addToTarget(pageFile: java.io.File): String {
+                            return if (pendingTarget == "new") {
+                                val doc = store.addPageToNewDoc(pageFile, scanName())
                                 pendingTarget = doc.id
                                 doc.id
                             } else {
-                                store.addPage(pendingTarget, processed)
+                                store.addPage(pendingTarget, pageFile)
                                 pendingTarget
                             }
+                        }
+                        fun finish(docId: String) {
                             refresh()
                             pendingCapture = null
-                            nav.navigate("scanner/$targetId") { popUpTo("home") { inclusive = false } }
-                        },
+                            if (continueScan) nav.navigate("scanner/$docId") { popUpTo("home") { inclusive = false } }
+                            else nav.navigate("doc/$docId") { popUpTo("home") { inclusive = false } }
+                        }
+                        when (pendingMode) {
+                            "book" -> Thread {
+                                val bmp = BmpFactory.decodeFile(processed.absolutePath)
+                                val (left, right) = Imaging.splitSpread(bmp)
+                                val f1 = java.io.File(context.cacheDir, "book_l_${System.currentTimeMillis()}.jpg")
+                                val f2 = java.io.File(context.cacheDir, "book_r_${System.currentTimeMillis()}.jpg")
+                                Imaging.saveJpeg(left, f1); Imaging.saveJpeg(right, f2)
+                                Handler(Looper.getMainLooper()).post {
+                                    val id = addToTarget(f1)
+                                    store.addPage(id, f2)
+                                    finish(id)
+                                }
+                            }.start()
+                            "id" -> {
+                                val front = pendingIdFront
+                                if (front == null) {
+                                    pendingIdFront = processed
+                                    pendingCapture = null
+                                    Toast.makeText(context, "Front saved — now scan the BACK side", Toast.LENGTH_LONG).show()
+                                    nav.navigate("scanner/$pendingTarget") { popUpTo("home") { inclusive = false } }
+                                } else {
+                                    pendingIdFront = null
+                                    Thread {
+                                        val fb = BmpFactory.decodeFile(front.absolutePath)
+                                        val bb = BmpFactory.decodeFile(processed.absolutePath)
+                                        val page = Imaging.composeIdPage(fb, bb)
+                                        val f = java.io.File(context.cacheDir, "idcard_${System.currentTimeMillis()}.jpg")
+                                        Imaging.saveJpeg(page, f)
+                                        Handler(Looper.getMainLooper()).post { finish(addToTarget(f)) }
+                                    }.start()
+                                }
+                            }
+                            else -> finish(addToTarget(processed))
+                        }
+                    }
+                    ReviewScreen(
+                        imageFile = file,
+                        initialFilter = modeFilter(pendingMode),
+                        onDone = { processed -> deliver(processed, false) },
+                        onNext = { processed -> deliver(processed, true) },
                         onRetake = { nav.popBackStack() }
                     )
                 }
@@ -291,7 +334,21 @@ fun HomeScreen(latest: Doc?, nav: NavController) {
 
 @Composable
 fun LibraryScreen(docs: List<Doc>, store: DocStore, onChanged: () -> Unit, nav: NavController) {
+    val libContext = LocalContext.current
     var filter by remember { mutableStateOf("All") }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            Toast.makeText(libContext, "Importing PDF…", Toast.LENGTH_SHORT).show()
+            Thread {
+                val doc = store.importPdf(uri)
+                Handler(Looper.getMainLooper()).post {
+                    onChanged()
+                    if (doc != null) nav.navigate("doc/${doc.id}")
+                    else Toast.makeText(libContext, "That PDF could not be imported.", Toast.LENGTH_SHORT).show()
+                }
+            }.start()
+        }
+    }
     val shown = docs.filter {
         when (filter) {
             "Scans" -> true
@@ -312,6 +369,8 @@ fun LibraryScreen(docs: List<Doc>, store: DocStore, onChanged: () -> Unit, nav: 
                         border = FilterChipDefaults.filterChipBorder(enabled = true, selected = filter == f, selectedBorderColor = Gold, borderColor = Line, selectedBorderWidth = 1.dp, borderWidth = 1.dp))
                 }
             }
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(onClick = { importLauncher.launch("application/pdf") }, shape = RoundedCornerShape(999.dp)) { Text("Import PDF") }
             Spacer(Modifier.height(8.dp))
         }
         if (shown.isEmpty()) {
@@ -395,9 +454,18 @@ fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavControll
             Text(doc.name, style = MaterialTheme.typography.headlineMedium)
             Text("${doc.pages.size} page${if (doc.pages.size == 1) "" else "s"} · ${whenText(doc.createdAt)}", color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
         }
-        items(doc.pages) { path ->
+        itemsIndexed(doc.pages) { idx, path ->
             Card(shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = CardBg), modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-                Thumb(path, null, 300.dp, Modifier.fillMaxWidth(), sample = 1)
+                Column {
+                    Thumb(path, null, 300.dp, Modifier.fillMaxWidth(), sample = 1)
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Page ${idx + 1}", color = Muted, fontSize = 12.5.sp, modifier = Modifier.padding(start = 8.dp))
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { store.movePage(doc.id, idx, -1); onChanged() }, enabled = idx > 0) { Text("↑ Up") }
+                        TextButton(onClick = { store.movePage(doc.id, idx, 1); onChanged() }, enabled = idx < doc.pages.size - 1) { Text("↓ Down") }
+                        TextButton(onClick = { store.deletePage(doc.id, idx); onChanged() }, enabled = doc.pages.size > 1) { Text("Remove", color = Color(0xFFB3352B)) }
+                    }
+                }
             }
         }
         item {

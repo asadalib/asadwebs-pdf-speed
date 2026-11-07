@@ -41,14 +41,14 @@ import java.io.File
  *  buttons re-run detection on the rotated photo. Done / Next page process
  *  the page at up to 3000px and hand the finished JPEG back. */
 @Composable
-fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit, onRetake: () -> Unit) {
+fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit, onRetake: () -> Unit, initialFilter: Imaging.ScanFilter = Imaging.ScanFilter.MAGIC) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var original by remember { mutableStateOf<Bitmap?>(null) }
     var master by remember { mutableStateOf<Bitmap?>(null) }
     var corners by remember { mutableStateOf<Array<PointF>?>(null) }
     var detected by remember { mutableStateOf(false) }
-    var filter by remember { mutableStateOf(Imaging.ScanFilter.MAGIC) }
+    var filter by remember { mutableStateOf(initialFilter) }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var mode by remember { mutableStateOf("adjust") }
     var dragIdx by remember { mutableStateOf<Int?>(null) }

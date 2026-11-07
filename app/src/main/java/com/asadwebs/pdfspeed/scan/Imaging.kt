@@ -2,6 +2,10 @@ package com.asadwebs.pdfspeed.scan
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Matrix
 import android.graphics.PointF
 import android.media.ExifInterface
@@ -507,4 +511,58 @@ object Imaging {
         val m = Matrix(); m.postRotate(d.toFloat())
         return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
     }
+
+    // ---------- live frames, ID cards, book spreads ----------
+
+    /** Grayscale bitmap from a CameraX YUV frame's luma plane, rotated upright. */
+    fun yuvToGray(image: androidx.camera.core.ImageProxy): Bitmap? {
+        return try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer.duplicate()
+            val rowStride = plane.rowStride
+            val w = image.width; val h = image.height
+            val pixels = IntArray(w * h)
+            val row = ByteArray(rowStride)
+            var i = 0
+            for (y in 0 until h) {
+                buffer.position(y * rowStride)
+                val n = minOf(rowStride, buffer.remaining())
+                buffer.get(row, 0, n)
+                for (x in 0 until w) {
+                    val v = row[x].toInt() and 0xFF
+                    pixels[i++] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+                }
+            }
+            var bmp = Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+            val rot = image.imageInfo.rotationDegrees
+            if (rot != 0) bmp = rotate(bmp, rot)
+            bmp
+        } catch (e: Exception) { null }
+    }
+
+    /** Front and back of an ID card composed onto one white A4-style page. */
+    fun composeIdPage(front: Bitmap, back: Bitmap): Bitmap {
+        val W = 1600; val H = 2263
+        val page = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(page)
+        canvas.drawColor(Color.WHITE)
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        val margin = 90f
+        val cardW = W - margin * 2
+        val fh = front.height * (cardW / front.width)
+        val bh = back.height * (cardW / back.width)
+        var top = (H - (fh + 70 + bh)) / 2
+        canvas.drawBitmap(front, null, RectF(margin, top, margin + cardW, top + fh), paint)
+        top += fh + 70
+        canvas.drawBitmap(back, null, RectF(margin, top, margin + cardW, top + bh), paint)
+        return page
+    }
+
+    /** A photographed book spread split into its two pages. */
+    fun splitSpread(bmp: Bitmap): Pair<Bitmap, Bitmap> {
+        val half = bmp.width / 2
+        return Bitmap.createBitmap(bmp, 0, 0, half, bmp.height) to
+            Bitmap.createBitmap(bmp, half, 0, bmp.width - half, bmp.height)
+    }
 }
+
