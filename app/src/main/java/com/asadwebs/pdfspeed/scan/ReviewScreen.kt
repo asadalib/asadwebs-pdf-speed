@@ -16,17 +16,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.asadwebs.pdfspeed.ui.Gold
@@ -36,9 +36,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** After-capture review: two modes — Adjust (original photo + draggable
- *  detected corners) and Preview (warped + filtered result). Done re-runs
- *  the warp + filter at full resolution and hands back the finished page. */
+/** After-capture review: Adjust mode (photo + draggable detected corners with
+ *  a magnifier loupe) and Preview mode (warped + filtered result). Rotate
+ *  buttons re-run detection on the rotated photo. Done / Next page process
+ *  the page at up to 3000px and hand the finished JPEG back. */
 @Composable
 fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit, onRetake: () -> Unit) {
     val context = LocalContext.current
@@ -51,9 +52,52 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var mode by remember { mutableStateOf("adjust") }
     var dragIdx by remember { mutableStateOf<Int?>(null) }
-
-    }
     var busy by remember { mutableStateOf(false) }
+
+    fun defaultCorners(): Array<PointF> = arrayOf(
+        PointF(0.03f, 0.03f), PointF(0.97f, 0.03f),
+        PointF(0.97f, 0.97f), PointF(0.03f, 0.97f)
+    )
+
+    LaunchedEffect(imageFile) {
+        withContext(Dispatchers.IO) {
+            val bmp = Imaging.loadOriented(imageFile)
+            original = bmp
+            master = Imaging.downscaleTo(bmp, 3000)
+            val found = Imaging.detectCorners(bmp)
+            corners = found ?: defaultCorners()
+            detected = found != null
+        }
+    }
+
+    LaunchedEffect(mode, filter) {
+        if (mode != "preview") return@LaunchedEffect
+        val bmp = original ?: return@LaunchedEffect
+        val c = corners ?: return@LaunchedEffect
+        preview = null
+        withContext(Dispatchers.IO) {
+            val small = Imaging.downscaleTo(master ?: bmp, 1400)
+            preview = Imaging.applyFilter(Imaging.warp(small, c), filter)
+        }
+    }
+
+    fun rotateBy(degCW: Int) {
+        val bmp = original ?: return
+        scope.launch {
+            busy = true
+            withContext(Dispatchers.IO) {
+                val r = Imaging.rotate(bmp, degCW)
+                original = r
+                master = Imaging.downscaleTo(r, 3000)
+                val found = Imaging.detectCorners(r)
+                corners = found ?: defaultCorners()
+                detected = found != null
+            }
+            preview = null
+            mode = "adjust"
+            busy = false
+        }
+    }
 
     fun processPage(deliver: (File) -> Unit) {
         val bmp = master ?: original ?: return
@@ -68,51 +112,6 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
             }
             busy = false
             deliver(outFile)
-        }
-    }
-
-    fun rotateBy(degCW: Int) {
-        val bmp = original ?: return
-        scope.launch {
-            busy = true
-            withContext(Dispatchers.IO) {
-                val r = Imaging.rotate(bmp, degCW)
-                original = r
-                master = Imaging.downscaleTo(r, 3000)
-                val found = Imaging.detectCorners(r)
-                corners = found ?: arrayOf(
-                    PointF(0.03f, 0.03f), PointF(0.97f, 0.03f),
-                    PointF(0.97f, 0.97f), PointF(0.03f, 0.97f)
-                )
-                detected = found != null
-            }
-            preview = null
-            mode = "adjust"
-            busy = false
-        }
-
-    LaunchedEffect(imageFile) {
-        withContext(Dispatchers.IO) {
-            val bmp = Imaging.loadOriented(imageFile)
-            original = bmp
-            master = Imaging.downscaleTo(bmp, 3000)
-            val found = Imaging.detectCorners(bmp)
-            corners = found ?: arrayOf(
-                PointF(0.03f, 0.03f), PointF(0.97f, 0.03f),
-                PointF(0.97f, 0.97f), PointF(0.03f, 0.97f)
-            )
-            detected = found != null
-        }
-    }
-
-    LaunchedEffect(mode, filter) {
-        if (mode != "preview") return@LaunchedEffect
-        val bmp = original ?: return@LaunchedEffect
-        val c = corners ?: return@LaunchedEffect
-        preview = null
-        withContext(Dispatchers.IO) {
-            val small = Imaging.downscaleTo(master ?: bmp, 1400)
-            preview = Imaging.applyFilter(Imaging.warp(small, c), filter)
         }
     }
 
@@ -170,7 +169,6 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
                             }
                             drawPath(path, color = Gold.copy(alpha = 0.25f))
                             drawPath(path, color = Gold, style = Stroke(width = 3f))
-                            // Magnifier loupe while a corner is being dragged
                             val di = dragIdx
                             if (di != null) {
                                 val cp = c[di]
