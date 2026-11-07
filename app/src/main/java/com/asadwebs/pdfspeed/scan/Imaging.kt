@@ -103,12 +103,12 @@ object Imaging {
             var area = 0f
             for (i in 0 until 4) {
                 val a = ord[i]; val b = ord[(i + 1) % 4]
-                area += a[0] * b[1] - b[0] * a[1]
+                area += (a[0] * b[1] - b[0] * a[1]).toFloat()
             }
             area = abs(area) / 2
             val frac = area / (dw * dh)
             if (frac < 0.08f || frac > 0.97f) return null
-            var sign = 0f
+            var sign = 0
             for (i in 0 until 4) {
                 val p0 = ord[i]; val p1 = ord[(i + 1) % 4]; val p2 = ord[(i + 2) % 4]
                 val cr = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0])
@@ -130,7 +130,7 @@ object Imaging {
             }
             val fill = inside / max(1f, area)
             if (fill < 0.50f) return null
-            return Pair(ord.map { PointF(it[0], it[1]) }.toTypedArray(), frac * fill)
+            return Pair(ord.map { PointF(it[0].toFloat(), it[1].toFloat()) }.toTypedArray(), frac * fill)
         }
 
         var best: Pair<Array<PointF>, Float>? = null
@@ -187,7 +187,7 @@ object Imaging {
 
     private fun orderCorners(q: List<IntArray>): List<IntArray> {
         var tl = 0; var tr = 0; var br = 0; var bl = 0
-        var sMin = 1e9; var sMax = -1e9; var dMax = -1e9; var dMin = 1e9
+        var sMin = Int.MAX_VALUE; var sMax = Int.MIN_VALUE; var dMax = Int.MIN_VALUE; var dMin = Int.MAX_VALUE
         for (i in 0 until 4) {
             val sm = q[i][0] + q[i][1]; val df = q[i][0] - q[i][1]
             if (sm < sMin) { sMin = sm; tl = i }

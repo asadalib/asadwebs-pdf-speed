@@ -10,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,9 +46,49 @@ import java.util.*
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Crash capture: write the stack trace to a file so the next launch can
+        // show and share it instead of dying silently. Diagnostic aid.
+        val crashFile = java.io.File(getExternalFilesDir(null) ?: filesDir, "crash.txt")
+        val prevHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val sw = java.io.StringWriter()
+                e.printStackTrace(java.io.PrintWriter(sw))
+                crashFile.writeText("PDF Speed crash - " + java.util.Date() + "\n\n" + sw.toString())
+            } catch (_: Exception) { }
+            prevHandler?.uncaughtException(t, e)
+        }
         setContent {
-            PDFSpeedTheme {
-                Surface(Modifier.fillMaxSize(), color = Cream) { AppRoot() }
+            var showCrash by remember { mutableStateOf(crashFile.exists() && (crashFile.length() > 0)) }
+            if (showCrash) {
+                MaterialTheme {
+                    Surface(Modifier.fillMaxSize()) {
+                        Column(Modifier.fillMaxSize().padding(20.dp)) {
+                            Text("PDF Speed stopped - crash report", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Spacer(Modifier.height(10.dp))
+                            val trace = remember { try { crashFile.readText() } catch (e: Exception) { "(could not read)" } }
+                            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                                Text(trace, fontSize = 11.sp)
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Button(onClick = {
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "PDF Speed crash log")
+                                    putExtra(Intent.EXTRA_TEXT, trace)
+                                }
+                                startActivity(Intent.createChooser(intent, "Share crash log"))
+                            }, modifier = Modifier.fillMaxWidth()) { Text("Share crash log") }
+                            TextButton(onClick = { crashFile.delete(); showCrash = false }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Delete report and try the app")
+                            }
+                        }
+                    }
+                }
+            } else {
+                PDFSpeedTheme {
+                    Surface(Modifier.fillMaxSize(), color = Cream) { AppRoot() }
+                }
             }
         }
     }
