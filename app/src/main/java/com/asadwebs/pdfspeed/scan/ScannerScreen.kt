@@ -89,7 +89,7 @@ private class Stab {
  *  callbacks always run on the main executor (an earlier crash came from
  *  navigating off a background thread). */
 @Composable
-fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit) {
+fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backSide: Boolean = false) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasPermission by remember {
@@ -119,6 +119,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit) {
         capHolder.busy = true
         val out = File(context.cacheDir, "capture_${System.currentTimeMillis()}.jpg")
         val options = ImageCapture.OutputFileOptions.Builder(out).build()
+        try {
         cap.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                 capHolder.frozen = true
@@ -129,6 +130,10 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit) {
                 Toast.makeText(context, "Capture failed: ${exception.message}", Toast.LENGTH_SHORT).show()
             }
         })
+        } catch (e: Exception) {
+            capHolder.busy = false
+            Toast.makeText(context, "Camera is busy — one moment.", Toast.LENGTH_SHORT).show()
+        }
     }
 
     val gallery = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -320,6 +325,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit) {
                     capHolder.busy -> "Capturing…"
                     liveCorners != null && autoCap -> "Edges found — hold steady, capturing automatically"
                     liveCorners != null -> "Edges found"
+                    mode.id == "id" && backSide -> "Front saved — now scan the BACK side"
                     mode.id == "id" -> "Fill the frame with the card, front side first"
                     mode.id == "book" -> "Photograph the open spread — it splits into 2 pages"
                     else -> "Point at a document and tap capture"

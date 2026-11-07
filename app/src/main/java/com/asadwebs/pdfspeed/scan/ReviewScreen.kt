@@ -125,23 +125,21 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
         }
     }
 
+    // Free the big bitmaps the moment this screen goes away. Leaving them
+    // for the GC while the camera reopened underneath was part of the
+    // Next-page close: peak memory stayed high exactly when capture needed it.
+    DisposableEffect(Unit) {
+        onDispose {
+            try { preview?.recycle() } catch (e: Exception) { }
+            try { val o = original; if (o != null && !o.isRecycled) o.recycle() } catch (e: Exception) { }
+        }
+    }
+
     Column(Modifier.fillMaxSize().background(Color(0xFF141210))) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onRetake, enabled = !busy) { Text("Retake", color = Color.White) }
             Text("Review", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            OutlinedButton(
-                onClick = { processPage { onNext(it) } },
-                enabled = !busy && original != null,
-                shape = RoundedCornerShape(999.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-            ) { Text("Next page") }
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = { processPage { onDone(it) } },
-                enabled = !busy && original != null,
-                shape = RoundedCornerShape(999.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)
-            ) { Text("Done") }
+            if (busy) CircularProgressIndicator(color = Gold, modifier = Modifier.size(20.dp))
         }
 
         Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
@@ -284,10 +282,24 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
                 )
             }
         }
-        if (busy) {
-            Row(Modifier.fillMaxWidth().padding(bottom = 14.dp), horizontalArrangement = Arrangement.Center) {
-                CircularProgressIndicator(color = Gold, modifier = Modifier.size(22.dp))
-            }
+        // Primary actions live at the BOTTOM now — thumb reach, one hand.
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = { processPage { onNext(it) } },
+                enabled = !busy && original != null,
+                shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 14.dp)
+            ) { Text("Next page", fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
+            Button(
+                onClick = { processPage { onDone(it) } },
+                enabled = !busy && original != null,
+                shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk),
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 14.dp)
+            ) { Text("Done", fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
         }
     }
 }

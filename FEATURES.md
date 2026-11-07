@@ -3,12 +3,12 @@ Status key: DONE = in the native app · PARTIAL = basic form exists · TODO = no
 Checked against app code 2026-11-08 (native Kotlin app, com.asadwebs.pdfspeed).
 
 ## 1. Scan & capture
-- Live edge detection + auto-capture — TODO (detection runs after capture, in Review)
-- Perspective fix + manual corners — DONE (dual-strategy detection, warp, loupe handles)
-- Batch scan (multi-page session) — PARTIAL (Next page adds pages to one document)
-- Modes: Document / ID Card / Book / Receipt / Whiteboard / Passport / Business Card — TODO
-- Flash, Grid — TODO · Gallery import — TODO · Import PDF — TODO
-- Reorder pages in session — TODO
+- Live edge detection + auto-capture — DONE (R1, 2026-11-08)
+- Perspective fix + manual corners — DONE (dual-strategy detection + edge-snap refinement, warp, loupe handles)
+- Batch scan (multi-page session) — DONE (Next page adds pages to one document)
+- Modes: Document / ID Card (two-sided, one page) / Book (spread split) / Receipt / Whiteboard / Passport / Card — DONE (R1)
+- Flash, Grid — DONE · Gallery import — DONE · Import PDF — DONE (Library → Import PDF)
+- Reorder pages — DONE (Doc screen: Up/Down/Remove per page)
 
 ## 2. Enhancement
 - Filters: Original DONE · Magic Color DONE · B&W DONE (adaptive) · Grayscale DONE · Auto ~ Magic Color · Lighten TODO

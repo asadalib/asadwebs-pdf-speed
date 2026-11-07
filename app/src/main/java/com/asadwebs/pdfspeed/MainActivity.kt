@@ -119,20 +119,19 @@ fun AppRoot() {
 
     Box(Modifier.fillMaxSize()) {
         NavHost(navController = nav, startDestination = "home", modifier = Modifier.fillMaxSize()) {
-            composable("home") { HomeScreen(docs.firstOrNull(), nav) }
+            composable("home") { HomeScreen(docs.firstOrNull(), nav, onScanNew = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") }) }
             composable("library") { LibraryScreen(docs, store, { refresh() }, nav) }
-            composable("tools") { ToolsScreen(nav) }
+            composable("tools") { ToolsScreen(nav, onScanNew = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") }) }
             composable("me") { MeScreen(docs.size) }
-            composable("scanner/{docId}") { entry ->
-                val docId = entry.arguments?.getString("docId") ?: "new"
+            composable("scanner") {
                 ScannerScreen(
                     onCaptured = { file, mode ->
                         pendingCapture = file
-                        pendingTarget = docId
                         pendingMode = mode
                         nav.navigate("review")
                     },
-                    onClose = { nav.popBackStack() }
+                    onClose = { nav.popBackStack() },
+                    backSide = pendingMode == "id" && pendingIdFront != null
                 )
             }
             composable("review") {
@@ -158,7 +157,7 @@ fun AppRoot() {
                         fun finish(docId: String) {
                             refresh()
                             pendingCapture = null
-                            if (continueScan) nav.navigate("scanner/$docId") { popUpTo("home") { inclusive = false } }
+                            if (continueScan) nav.popBackStack()
                             else nav.navigate("doc/$docId") { popUpTo("home") { inclusive = false } }
                         }
                         when (pendingMode) {
@@ -180,7 +179,7 @@ fun AppRoot() {
                                     pendingIdFront = processed
                                     pendingCapture = null
                                     Toast.makeText(context, "Front saved — now scan the BACK side", Toast.LENGTH_LONG).show()
-                                    nav.navigate("scanner/$pendingTarget") { popUpTo("home") { inclusive = false } }
+                                    nav.popBackStack()
                                 } else {
                                     pendingIdFront = null
                                     Thread {
@@ -209,7 +208,7 @@ fun AppRoot() {
                 val docId = entry.arguments?.getString("docId")
                 val doc = docs.firstOrNull { it.id == docId }
                 if (doc != null) {
-                    DocScreen(doc, store, { refresh() }, nav)
+                    DocScreen(doc, store, { refresh() }, nav, onAddPage = { pendingTarget = doc.id; nav.navigate("scanner") })
                 } else {
                     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
                         Text("This document could not be opened.", style = MaterialTheme.typography.titleLarge)
@@ -223,12 +222,12 @@ fun AppRoot() {
                 }
             }
         }
-        if (showBar) BottomBar(route, nav, Modifier.align(Alignment.BottomCenter))
+        if (showBar) BottomBar(route, nav, Modifier.align(Alignment.BottomCenter), onScan = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") })
     }
 }
 
 @Composable
-fun BottomBar(route: String?, nav: NavController, modifier: Modifier = Modifier) {
+fun BottomBar(route: String?, nav: NavController, modifier: Modifier = Modifier, onScan: () -> Unit = {}) {
     Card(
         modifier = modifier.padding(bottom = 14.dp).widthIn(max = 430.dp).fillMaxWidth(0.94f),
         shape = RoundedCornerShape(999.dp),
@@ -240,7 +239,7 @@ fun BottomBar(route: String?, nav: NavController, modifier: Modifier = Modifier)
             BarItem("Files", route == "library") { nav.navigate("library") { launchSingleTop = true } }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Button(
-                    onClick = { nav.navigate("scanner/new") },
+                    onClick = onScan,
                     shape = CircleShape,
                     colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk),
                     modifier = Modifier.size(56.dp).offset(y = (-14).dp),
@@ -264,7 +263,7 @@ fun RowScope.BarItem(label: String, active: Boolean, onClick: () -> Unit) {
 fun Kicker(text: String) = Text(text.uppercase(), style = MaterialTheme.typography.labelSmall)
 
 @Composable
-fun HomeScreen(latest: Doc?, nav: NavController) {
+fun HomeScreen(latest: Doc?, nav: NavController, onScanNew: () -> Unit = {}) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
         item {
             Spacer(Modifier.height(18.dp))
@@ -294,7 +293,7 @@ fun HomeScreen(latest: Doc?, nav: NavController) {
             item {
                 Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg),
                     elevation = CardDefaults.cardElevation(2.dp),
-                    modifier = Modifier.fillMaxWidth().clickable { nav.navigate("scanner/new") }) {
+                    modifier = Modifier.fillMaxWidth().clickable { onScanNew() }) {
                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("📷", fontSize = 30.sp)
                         Spacer(Modifier.width(14.dp))
@@ -303,7 +302,7 @@ fun HomeScreen(latest: Doc?, nav: NavController) {
                             Text("Scan your first page", style = MaterialTheme.typography.titleLarge)
                             Text("Camera scanner — more smarts in the next update", color = Muted, fontSize = 12.5.sp)
                         }
-                        Button(onClick = { nav.navigate("scanner/new") }, shape = RoundedCornerShape(999.dp),
+                        Button(onClick = { onScanNew() }, shape = RoundedCornerShape(999.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) { Text("Scan") }
                     }
                 }
@@ -312,13 +311,13 @@ fun HomeScreen(latest: Doc?, nav: NavController) {
         }
         item { Kicker("What would you like to do"); Spacer(Modifier.height(6.dp)) }
         val rows = listOf(
-            Triple("01", "Scan a document", "scanner/new"),
+            Triple("01", "Scan a document", "scan"),
             Triple("02", "Organize pages", "library"),
             Triple("03", "Sign and annotate", "tools"),
             Triple("04", "Convert and compress", "tools")
         )
         items(rows) { (num, name, dest) ->
-            Row(Modifier.fillMaxWidth().clickable { nav.navigate(dest) }.padding(vertical = 15.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().clickable { if (dest == "scan") onScanNew() else nav.navigate(dest) }.padding(vertical = 15.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(num, color = GoldDeep, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, modifier = Modifier.width(30.dp))
                 Text(name, fontSize = 16.5.sp, modifier = Modifier.weight(1f))
                 Text("→", color = Muted)
@@ -394,7 +393,7 @@ fun LibraryScreen(docs: List<Doc>, store: DocStore, onChanged: () -> Unit, nav: 
 }
 
 @Composable
-fun ToolsScreen(nav: NavController) {
+fun ToolsScreen(nav: NavController, onScanNew: () -> Unit = {}) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
         item {
             Spacer(Modifier.height(18.dp))
@@ -412,7 +411,7 @@ fun ToolsScreen(nav: NavController) {
         sections.forEach { (title, tools) ->
             item { Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 20.dp, bottom = 6.dp)) }
             items(tools) { (name, live) ->
-                Row(Modifier.fillMaxWidth().then(if (live) Modifier.clickable { nav.navigate("scanner/new") } else Modifier).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().then(if (live) Modifier.clickable { onScanNew() } else Modifier).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(name, fontSize = 16.sp, modifier = Modifier.weight(1f), color = if (live) Ink else Muted)
                     if (live) Text("→", color = Muted) else Text("Next update", color = GoldDeep, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
@@ -442,7 +441,7 @@ fun MeScreen(docCount: Int) {
 }
 
 @Composable
-fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavController) {
+fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavController, onAddPage: () -> Unit = {}) {
     val context = LocalContext.current
     var confirmDelete by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 40.dp)) {
@@ -470,7 +469,7 @@ fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavControll
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { nav.navigate("scanner/${doc.id}") }, shape = RoundedCornerShape(999.dp),
+                Button(onClick = onAddPage, shape = RoundedCornerShape(999.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk), modifier = Modifier.weight(1f)) { Text("Add page") }
                 OutlinedButton(onClick = {
                     val pdf = store.exportPdf(doc)
