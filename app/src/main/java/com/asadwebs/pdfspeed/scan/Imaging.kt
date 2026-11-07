@@ -266,6 +266,66 @@ object Imaging {
     }
 
 
+
+    private fun cross(o: IntArray, a: IntArray, b: IntArray): Int =
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    private fun convexHull(input: List<IntArray>): List<IntArray> {
+        val pts = input.sortedWith(compareBy({ it[0] }, { it[1] }))
+        if (pts.size < 3) return pts
+        val lo = ArrayList<IntArray>()
+        for (pt in pts) {
+            while (lo.size >= 2 && cross(lo[lo.size - 2], lo[lo.size - 1], pt) <= 0) lo.removeAt(lo.size - 1)
+            lo.add(pt)
+        }
+        val hi = ArrayList<IntArray>()
+        for (i in pts.indices.reversed()) {
+            val pt = pts[i]
+            while (hi.size >= 2 && cross(hi[hi.size - 2], hi[hi.size - 1], pt) <= 0) hi.removeAt(hi.size - 1)
+            hi.add(pt)
+        }
+        lo.removeAt(lo.size - 1); hi.removeAt(hi.size - 1)
+        return lo + hi
+    }
+
+    private fun simplifyTo4(input: List<IntArray>): List<IntArray>? {
+        val pts = input.toMutableList()
+        if (pts.size < 4) return null
+        while (pts.size > 4) {
+            var best = -1; var bestD = 1e18
+            for (i in pts.indices) {
+                val a = pts[(i + pts.size - 1) % pts.size]; val b = pts[i]; val c = pts[(i + 1) % pts.size]
+                val dx = (c[0] - a[0]).toDouble(); val dy = (c[1] - a[1]).toDouble()
+                val l = max(1.0, hypot(dx, dy))
+                val dist = abs((b[0] - a[0]) * dy - (b[1] - a[1]) * dx) / l
+                if (dist < bestD) { bestD = dist; best = i }
+            }
+            pts.removeAt(best)
+        }
+        return pts
+    }
+
+    private fun orderCorners(q: List<IntArray>): List<IntArray> {
+        var tl = 0; var tr = 0; var br = 0; var bl = 0
+        var sMin = Int.MAX_VALUE; var sMax = Int.MIN_VALUE; var dMax = Int.MIN_VALUE; var dMin = Int.MAX_VALUE
+        for (i in 0 until 4) {
+            val sm = q[i][0] + q[i][1]; val df = q[i][0] - q[i][1]
+            if (sm < sMin) { sMin = sm; tl = i }
+            if (sm > sMax) { sMax = sm; br = i }
+            if (df > dMax) { dMax = df; tr = i }
+            if (df < dMin) { dMin = df; bl = i }
+        }
+        val idx = listOf(tl, tr, br, bl)
+        if (idx.toSet().size < 4) {
+            val cx = q.sumOf { it[0] } / 4.0; val cy = q.sumOf { it[1] } / 4.0
+            val sorted = q.sortedBy { kotlin.math.atan2(it[1] - cy, it[0] - cx) }
+            var st = 0
+            for (i in 0 until 4) if (sorted[i][0] + sorted[i][1] < sorted[st][0] + sorted[st][1]) st = i
+            return listOf(sorted[st], sorted[(st + 1) % 4], sorted[(st + 2) % 4], sorted[(st + 3) % 4])
+        }
+        return listOf(q[tl], q[tr], q[br], q[bl])
+    }
+
     // ---------- perspective warp (port of homography + per-pixel warp) ----------
 
     private fun homography(dst: Array<PointF>, srcp: Array<PointF>): DoubleArray? {

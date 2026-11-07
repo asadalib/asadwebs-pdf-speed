@@ -52,6 +52,25 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
     var mode by remember { mutableStateOf("adjust") }
     var dragIdx by remember { mutableStateOf<Int?>(null) }
 
+    }
+    var busy by remember { mutableStateOf(false) }
+
+    fun processPage(deliver: (File) -> Unit) {
+        val bmp = master ?: original ?: return
+        val c = corners ?: return
+        busy = true
+        scope.launch {
+            val outFile = withContext(Dispatchers.IO) {
+                val done = Imaging.applyFilter(Imaging.warp(bmp, c), filter)
+                val f = File(context.cacheDir, "page_${System.currentTimeMillis()}.jpg")
+                Imaging.saveJpeg(done, f)
+                f
+            }
+            busy = false
+            deliver(outFile)
+        }
+    }
+
     fun rotateBy(degCW: Int) {
         val bmp = original ?: return
         scope.launch {
@@ -71,24 +90,6 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
             mode = "adjust"
             busy = false
         }
-    }
-    var busy by remember { mutableStateOf(false) }
-
-    fun processPage(deliver: (File) -> Unit) {
-        val bmp = master ?: original ?: return
-        val c = corners ?: return
-        busy = true
-        scope.launch {
-            val outFile = withContext(Dispatchers.IO) {
-                val done = Imaging.applyFilter(Imaging.warp(bmp, c), filter)
-                val f = File(context.cacheDir, "page_${System.currentTimeMillis()}.jpg")
-                Imaging.saveJpeg(done, f)
-                f
-            }
-            busy = false
-            deliver(outFile)
-        }
-    }
 
     LaunchedEffect(imageFile) {
         withContext(Dispatchers.IO) {
