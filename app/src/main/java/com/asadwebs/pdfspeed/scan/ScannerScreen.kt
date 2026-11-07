@@ -35,7 +35,6 @@ import com.asadwebs.pdfspeed.ui.Gold
 import com.asadwebs.pdfspeed.ui.GoldInk
 import com.asadwebs.pdfspeed.ui.Ink
 import java.io.File
-import java.util.concurrent.Executors
 
 /** CameraX scanner: live preview + capture. Edge detection arrives in the
  *  review step (next milestone); capture saves the full frame as a page. */
@@ -50,7 +49,6 @@ fun ScannerScreen(onCaptured: (File) -> Unit, onClose: () -> Unit) {
     LaunchedEffect(Unit) { if (!hasPermission) launcher.launch(Manifest.permission.CAMERA) }
 
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
-    val executor = remember { Executors.newSingleThreadExecutor() }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (hasPermission) {
@@ -103,7 +101,7 @@ fun ScannerScreen(onCaptured: (File) -> Unit, onClose: () -> Unit) {
                     val cap = imageCapture ?: return@Button
                     val out = File(context.cacheDir, "capture_${System.currentTimeMillis()}.jpg")
                     val options = ImageCapture.OutputFileOptions.Builder(out).build()
-                    cap.takePicture(options, executor, object : ImageCapture.OnImageSavedCallback {
+                    cap.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
                         override fun onImageSaved(result: ImageCapture.OutputFileResults) { onCaptured(out) }
                         override fun onError(exception: ImageCaptureException) {
                             Toast.makeText(context, "Capture failed: ${exception.message}", Toast.LENGTH_SHORT).show()
