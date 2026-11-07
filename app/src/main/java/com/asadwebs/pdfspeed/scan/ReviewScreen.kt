@@ -15,6 +15,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
@@ -46,6 +50,28 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
     var filter by remember { mutableStateOf(Imaging.ScanFilter.MAGIC) }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var mode by remember { mutableStateOf("adjust") }
+    var dragIdx by remember { mutableStateOf<Int?>(null) }
+
+    fun rotateBy(degCW: Int) {
+        val bmp = original ?: return
+        scope.launch {
+            busy = true
+            withContext(Dispatchers.IO) {
+                val r = Imaging.rotate(bmp, degCW)
+                original = r
+                master = Imaging.downscaleTo(r, 3000)
+                val found = Imaging.detectCorners(r)
+                corners = found ?: arrayOf(
+                    PointF(0.03f, 0.03f), PointF(0.97f, 0.03f),
+                    PointF(0.97f, 0.97f), PointF(0.03f, 0.97f)
+                )
+                detected = found != null
+            }
+            preview = null
+            mode = "adjust"
+            busy = false
+        }
+    }
     var busy by remember { mutableStateOf(false) }
 
     fun processPage(deliver: (File) -> Unit) {
@@ -143,16 +169,42 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
                             }
                             drawPath(path, color = Gold.copy(alpha = 0.25f))
                             drawPath(path, color = Gold, style = Stroke(width = 3f))
+                            // Magnifier loupe while a corner is being dragged
+                            val di = dragIdx
+                            if (di != null) {
+                                val cp = c[di]
+                                val loupeR = 58.dp.toPx()
+                                val cxL = size.width / 2
+                                val cyL = loupeR + 10.dp.toPx()
+                                val lPath = Path().apply { addOval(Rect(cxL - loupeR, cyL - loupeR, cxL + loupeR, cyL + loupeR)) }
+                                clipPath(lPath) {
+                                    val srcW = (bmp.width * 0.16f).toInt().coerceAtLeast(10)
+                                    val sx = ((cp.x * bmp.width).toInt() - srcW / 2).coerceIn(0, maxOf(0, bmp.width - srcW))
+                                    val sy = ((cp.y * bmp.height).toInt() - srcW / 2).coerceIn(0, maxOf(0, bmp.height - srcW))
+                                    drawImage(bmp.asImageBitmap(),
+                                        srcOffset = IntOffset(sx, sy),
+                                        srcSize = IntSize(srcW, srcW),
+                                        dstOffset = IntOffset((cxL - loupeR).toInt(), (cyL - loupeR).toInt()),
+                                        dstSize = IntSize((loupeR * 2).toInt(), (loupeR * 2).toInt()))
+                                }
+                                drawCircle(Color.White, loupeR, Offset(cxL, cyL), style = Stroke(width = 3f))
+                                drawLine(Gold, Offset(cxL - 13, cyL), Offset(cxL + 13, cyL), strokeWidth = 2.5f)
+                                drawLine(Gold, Offset(cxL, cyL - 13), Offset(cxL, cyL + 13), strokeWidth = 2.5f)
+                            }
                         }
                         c.forEachIndexed { idx, p ->
                             Box(
                                 Modifier
-                                    .offset(x = (offX + p.x * dispW - 17).dp, y = (offY + p.y * dispH - 17).dp)
-                                    .size(34.dp)
+                                    .offset(x = (offX + p.x * dispW - 21).dp, y = (offY + p.y * dispH - 21).dp)
+                                    .size(42.dp)
                                     .clip(CircleShape)
-                                    .background(Gold)
+                                    .background(Color.White)
                                     .pointerInput(idx) {
-                                        detectDragGestures { change, drag ->
+                                        detectDragGestures(
+                                            onDragStart = { dragIdx = idx },
+                                            onDragEnd = { dragIdx = null },
+                                            onDragCancel = { dragIdx = null }
+                                        ) { change, drag ->
                                             change.consume()
                                             val cur = corners ?: return@detectDragGestures
                                             val next = Array(4) { PointF(cur[it].x, cur[it].y) }
@@ -164,7 +216,11 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
                                         }
                                     },
                                 contentAlignment = Alignment.Center
-                            ) { Text("✥", color = GoldInk, fontSize = 15.sp) }
+                            ) {
+                                Box(Modifier.size(34.dp).clip(CircleShape).background(Gold), contentAlignment = Alignment.Center) {
+                                    Text("✥", color = GoldInk, fontSize = 15.sp)
+                                }
+                            }
                         }
                     }
                 }
@@ -178,6 +234,14 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
             color = Color(0xFFCFC8BA), fontSize = 12.5.sp,
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp)
         )
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Rotate:", color = Color(0xFFCFC8BA), fontSize = 12.5.sp)
+            OutlinedButton(onClick = { rotateBy(270) }, enabled = !busy && original != null, shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)) { Text("⟲ Left", fontSize = 12.5.sp) }
+            OutlinedButton(onClick = { rotateBy(90) }, enabled = !busy && original != null, shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)) { Text("Right ⟳", fontSize = 12.5.sp) }
+        }
+        Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = mode == "adjust",
