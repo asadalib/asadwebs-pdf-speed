@@ -12,6 +12,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        ndk { abiFilters.add("arm64-v8a") }
     }
     buildTypes { release { isMinifyEnabled = false } }
     buildFeatures { compose = true }
@@ -32,5 +33,6 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.1")
     implementation("androidx.camera:camera-lifecycle:1.4.1")
     implementation("androidx.camera:camera-view:1.4.1")
+    implementation("io.github.mayuce:AndroidDocumentScanner:1.6.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

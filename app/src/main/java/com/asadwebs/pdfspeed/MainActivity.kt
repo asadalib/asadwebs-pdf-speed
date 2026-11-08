@@ -45,6 +45,7 @@ import com.asadwebs.pdfspeed.data.DocStore
 import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.scan.ReviewScreen
 import com.asadwebs.pdfspeed.scan.ScannerScreen
+import com.asadwebs.pdfspeed.scan.CropScreen
 import com.asadwebs.pdfspeed.scan.Imaging
 import com.asadwebs.pdfspeed.scan.modeFilter
 import android.graphics.BitmapFactory as BmpFactory
@@ -114,6 +115,7 @@ fun AppRoot() {
     var pendingCapture by remember { mutableStateOf<java.io.File?>(null) }
     var pendingTarget by remember { mutableStateOf("new") }
     var pendingMode by remember { mutableStateOf("doc") }
+    var pendingPreCropped by remember { mutableStateOf(false) }
     var pendingIdFront by remember { mutableStateOf<java.io.File?>(null) }
     val nav = rememberNavController()
     val route = nav.currentBackStackEntryAsState().value?.destination?.route
@@ -131,11 +133,33 @@ fun AppRoot() {
                     onCaptured = { file, mode ->
                         pendingCapture = file
                         pendingMode = mode
-                        nav.navigate("review")
+                        pendingPreCropped = false
+                        nav.navigate("crop")
                     },
                     onClose = { nav.popBackStack() },
                     backSide = pendingMode == "id" && pendingIdFront != null
                 )
+            }
+            composable("crop") {
+                val file = pendingCapture
+                if (file == null) {
+                    LaunchedEffect(Unit) { nav.popBackStack() }
+                } else {
+                    CropScreen(
+                        imageFile = file,
+                        onCropped = { cropped ->
+                            pendingCapture = cropped
+                            pendingPreCropped = true
+                            nav.navigate("review") { popUpTo("scanner") { inclusive = false } }
+                        },
+                        onFallback = { original ->
+                            pendingCapture = original
+                            pendingPreCropped = false
+                            nav.navigate("review") { popUpTo("scanner") { inclusive = false } }
+                        },
+                        onCancel = { nav.popBackStack() }
+                    )
+                }
             }
             composable("review") {
                 val file = pendingCapture
@@ -203,6 +227,7 @@ fun AppRoot() {
                     ReviewScreen(
                         imageFile = file,
                         initialFilter = modeFilter(pendingMode),
+                        preCropped = pendingPreCropped,
                         onDone = { processed -> deliver(processed, false) },
                         onNext = { processed -> deliver(processed, true) },
                         onRetake = { nav.popBackStack() }

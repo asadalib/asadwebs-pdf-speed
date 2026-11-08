@@ -1,0 +1,2087 @@
+════════════════════════════════════════════════════════
+FILE: app/src/main/java/com/asadwebs/pdfspeed/MainActivity.kt
+════════════════════════════════════════════════════════
+
+package com.asadwebs.pdfspeed
+
+import android.content.Intent
+import android.graphics.BitmapFactory
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.navigation.NavController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import com.asadwebs.pdfspeed.data.Doc
+import com.asadwebs.pdfspeed.data.DocStore
+import com.asadwebs.pdfspeed.data.Trace
+import com.asadwebs.pdfspeed.scan.ReviewScreen
+import com.asadwebs.pdfspeed.scan.ScannerScreen
+import com.asadwebs.pdfspeed.scan.Imaging
+import com.asadwebs.pdfspeed.scan.modeFilter
+import android.graphics.BitmapFactory as BmpFactory
+import com.asadwebs.pdfspeed.ui.*
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.*
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        Trace.init(applicationContext)
+        // Crash capture: write the stack trace to a file so the next launch can
+        // show and share it instead of dying silently. Diagnostic aid.
+        val crashFile = java.io.File(getExternalFilesDir(null) ?: filesDir, "crash.txt")
+        val prevHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val sw = java.io.StringWriter()
+                e.printStackTrace(java.io.PrintWriter(sw))
+                crashFile.writeText("PDF Speed crash - " + java.util.Date() + "\n\n" + sw.toString())
+            } catch (_: Exception) { }
+            prevHandler?.uncaughtException(t, e)
+        }
+        setContent {
+            var showCrash by remember { mutableStateOf(crashFile.exists() && (crashFile.length() > 0)) }
+            if (showCrash) {
+                MaterialTheme {
+                    Surface(Modifier.fillMaxSize()) {
+                        Column(Modifier.fillMaxSize().padding(20.dp)) {
+                            Text("PDF Speed stopped - crash report", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Spacer(Modifier.height(10.dp))
+                            val trace = remember { try { crashFile.readText() } catch (e: Exception) { "(could not read)" } }
+                            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                                Text(trace, fontSize = 11.sp)
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Button(onClick = {
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "PDF Speed crash log")
+                                    putExtra(Intent.EXTRA_TEXT, trace)
+                                }
+                                startActivity(Intent.createChooser(intent, "Share crash log"))
+                            }, modifier = Modifier.fillMaxWidth()) { Text("Share crash log") }
+                            TextButton(onClick = { crashFile.delete(); showCrash = false }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Delete report and try the app")
+                            }
+                        }
+                    }
+                }
+            } else {
+                PDFSpeedTheme {
+                    Surface(Modifier.fillMaxSize(), color = Cream) { AppRoot() }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppRoot() {
+    val context = LocalContext.current
+    val store = remember { DocStore(context) }
+    var docs by remember { mutableStateOf(store.load()) }
+    fun refresh() { docs = store.load() }
+    var pendingCapture by remember { mutableStateOf<java.io.File?>(null) }
+    var pendingTarget by remember { mutableStateOf("new") }
+    var pendingMode by remember { mutableStateOf("doc") }
+    var pendingIdFront by remember { mutableStateOf<java.io.File?>(null) }
+    val nav = rememberNavController()
+    val route = nav.currentBackStackEntryAsState().value?.destination?.route
+    val showBar = route in listOf("home", "library", "tools", "me")
+    LaunchedEffect(route) { Trace.log("route -> $route") }
+
+    Box(Modifier.fillMaxSize()) {
+        NavHost(navController = nav, startDestination = "home", modifier = Modifier.fillMaxSize()) {
+            composable("home") { HomeScreen(docs.firstOrNull(), nav, onScanNew = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") }) }
+            composable("library") { LibraryScreen(docs, store, { refresh() }, nav) }
+            composable("tools") { ToolsScreen(nav, onScanNew = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") }) }
+            composable("me") { MeScreen(docs.size) }
+            composable("scanner") {
+                ScannerScreen(
+                    onCaptured = { file, mode ->
+                        pendingCapture = file
+                        pendingMode = mode
+                        nav.navigate("review")
+                    },
+                    onClose = { nav.popBackStack() },
+                    backSide = pendingMode == "id" && pendingIdFront != null
+                )
+            }
+            composable("review") {
+                val file = pendingCapture
+                if (file == null) {
+                    LaunchedEffect(Unit) { nav.popBackStack() }
+                } else {
+                    // One delivery path for every mode: Book splits the spread
+                    // into two pages; ID Card waits for the back side, then
+                    // composes front+back onto a single page.
+                    fun deliver(processed: java.io.File, continueScan: Boolean) {
+                        Trace.log("deliver mode=$pendingMode continue=$continueScan target=$pendingTarget")
+                        fun scanName() = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
+                        fun addToTarget(pageFile: java.io.File): String {
+                            return if (pendingTarget == "new") {
+                                val doc = store.addPageToNewDoc(pageFile, scanName())
+                                pendingTarget = doc.id
+                                doc.id
+                            } else {
+                                store.addPage(pendingTarget, pageFile)
+                                pendingTarget
+                            }
+                        }
+                        fun finish(docId: String) {
+                            Trace.log("finish continue=$continueScan doc=$docId")
+                            refresh()
+                            pendingCapture = null
+                            if (continueScan) nav.popBackStack()
+                            else nav.navigate("doc/$docId") { popUpTo("home") { inclusive = false } }
+                        }
+                        when (pendingMode) {
+                            "book" -> Thread {
+                                val bmp = BmpFactory.decodeFile(processed.absolutePath)
+                                val (left, right) = Imaging.splitSpread(bmp)
+                                val f1 = java.io.File(context.cacheDir, "book_l_${System.currentTimeMillis()}.jpg")
+                                val f2 = java.io.File(context.cacheDir, "book_r_${System.currentTimeMillis()}.jpg")
+                                Imaging.saveJpeg(left, f1); Imaging.saveJpeg(right, f2)
+                                Handler(Looper.getMainLooper()).post {
+                                    val id = addToTarget(f1)
+                                    store.addPage(id, f2)
+                                    finish(id)
+                                }
+                            }.start()
+                            "id" -> {
+                                val front = pendingIdFront
+                                if (front == null) {
+                                    pendingIdFront = processed
+                                    pendingCapture = null
+                                    Toast.makeText(context, "Front saved — now scan the BACK side", Toast.LENGTH_LONG).show()
+                                    nav.popBackStack()
+                                } else {
+                                    pendingIdFront = null
+                                    Thread {
+                                        val fb = BmpFactory.decodeFile(front.absolutePath)
+                                        val bb = BmpFactory.decodeFile(processed.absolutePath)
+                                        val page = Imaging.composeIdPage(fb, bb)
+                                        val f = java.io.File(context.cacheDir, "idcard_${System.currentTimeMillis()}.jpg")
+                                        Imaging.saveJpeg(page, f)
+                                        Handler(Looper.getMainLooper()).post { finish(addToTarget(f)) }
+                                    }.start()
+                                }
+                            }
+                            else -> finish(addToTarget(processed))
+                        }
+                    }
+                    ReviewScreen(
+                        imageFile = file,
+                        initialFilter = modeFilter(pendingMode),
+                        onDone = { processed -> deliver(processed, false) },
+                        onNext = { processed -> deliver(processed, true) },
+                        onRetake = { nav.popBackStack() }
+                    )
+                }
+            }
+            composable("doc/{docId}") { entry ->
+                val docId = entry.arguments?.getString("docId")
+                val doc = docs.firstOrNull { it.id == docId }
+                if (doc != null) {
+                    DocScreen(doc, store, { refresh() }, nav, onAddPage = { pendingTarget = doc.id; nav.navigate("scanner") })
+                } else {
+                    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
+                        Text("This document could not be opened.", style = MaterialTheme.typography.titleLarge)
+                        Spacer(Modifier.height(8.dp))
+                        Text("It may still be saving. Your scans are in the library.", color = Muted)
+                        Spacer(Modifier.height(16.dp))
+                        Button(onClick = { nav.navigate("library") { popUpTo("home") { inclusive = false } } },
+                            shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) { Text("Go to library") }
+                    }
+                }
+            }
+        }
+        if (showBar) BottomBar(route, nav, Modifier.align(Alignment.BottomCenter), onScan = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") })
+    }
+}
+
+@Composable
+fun BottomBar(route: String?, nav: NavController, modifier: Modifier = Modifier, onScan: () -> Unit = {}) {
+    Card(
+        modifier = modifier.padding(bottom = 14.dp).widthIn(max = 430.dp).fillMaxWidth(0.94f),
+        shape = RoundedCornerShape(999.dp),
+        colors = CardDefaults.cardColors(containerColor = CardBg),
+        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.Bottom) {
+            BarItem("Home", route == "home") { nav.navigate("home") { launchSingleTop = true } }
+            BarItem("Files", route == "library") { nav.navigate("library") { launchSingleTop = true } }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Button(
+                    onClick = onScan,
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk),
+                    modifier = Modifier.size(56.dp).offset(y = (-14).dp),
+                    contentPadding = PaddingValues(0.dp)
+                ) { Text("Scan", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold) }
+            }
+            BarItem("Tools", route == "tools") { nav.navigate("tools") { launchSingleTop = true } }
+            BarItem("Me", route == "me") { nav.navigate("me") { launchSingleTop = true } }
+        }
+    }
+}
+
+@Composable
+fun RowScope.BarItem(label: String, active: Boolean, onClick: () -> Unit) {
+    TextButton(onClick = onClick, modifier = Modifier.weight(1f)) {
+        Text(label, color = if (active) Ink else Muted, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium, fontSize = 12.5.sp)
+    }
+}
+
+@Composable
+fun Kicker(text: String) = Text(text.uppercase(), style = MaterialTheme.typography.labelSmall)
+
+@Composable
+fun HomeScreen(latest: Doc?, nav: NavController, onScanNew: () -> Unit = {}) {
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
+        item {
+            Spacer(Modifier.height(18.dp))
+            Kicker("PDF Speed")
+            Text("Documents,\nat speed.", style = MaterialTheme.typography.displayMedium, modifier = Modifier.padding(vertical = 14.dp))
+        }
+        if (latest != null) {
+            item {
+                Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg),
+                    elevation = CardDefaults.cardElevation(2.dp),
+                    modifier = Modifier.fillMaxWidth().clickable { nav.navigate("doc/${latest.id}") }) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Thumb(latest.pages.firstOrNull(), 56.dp, 72.dp)
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Continue reading", color = Muted, fontSize = 12.5.sp)
+                            Text(latest.name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${latest.pages.size} page${if (latest.pages.size == 1) "" else "s"} · ${whenText(latest.createdAt)}", color = Muted, fontSize = 12.5.sp)
+                        }
+                        Button(onClick = { nav.navigate("doc/${latest.id}") }, shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) { Text("Open") }
+                    }
+                }
+                Spacer(Modifier.height(26.dp))
+            }
+        } else {
+            item {
+                Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg),
+                    elevation = CardDefaults.cardElevation(2.dp),
+                    modifier = Modifier.fillMaxWidth().clickable { onScanNew() }) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("📷", fontSize = 30.sp)
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Start here", color = Muted, fontSize = 12.5.sp)
+                            Text("Scan your first page", style = MaterialTheme.typography.titleLarge)
+                            Text("Camera scanner — more smarts in the next update", color = Muted, fontSize = 12.5.sp)
+                        }
+                        Button(onClick = { onScanNew() }, shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) { Text("Scan") }
+                    }
+                }
+                Spacer(Modifier.height(26.dp))
+            }
+        }
+        item { Kicker("What would you like to do"); Spacer(Modifier.height(6.dp)) }
+        val rows = listOf(
+            Triple("01", "Scan a document", "scan"),
+            Triple("02", "Organize pages", "library"),
+            Triple("03", "Sign and annotate", "tools"),
+            Triple("04", "Convert and compress", "tools")
+        )
+        items(rows) { (num, name, dest) ->
+            Row(Modifier.fillMaxWidth().clickable { if (dest == "scan") onScanNew() else nav.navigate(dest) }.padding(vertical = 15.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(num, color = GoldDeep, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, modifier = Modifier.width(30.dp))
+                Text(name, fontSize = 16.5.sp, modifier = Modifier.weight(1f))
+                Text("→", color = Muted)
+            }
+            HorizontalDivider(color = Line)
+        }
+        item {
+            Spacer(Modifier.height(18.dp))
+            Text("Every document is created on this phone. Nothing is uploaded.", color = Muted, fontSize = 12.5.sp, lineHeight = 18.sp)
+        }
+    }
+}
+
+@Composable
+fun LibraryScreen(docs: List<Doc>, store: DocStore, onChanged: () -> Unit, nav: NavController) {
+    val libContext = LocalContext.current
+    var filter by remember { mutableStateOf("All") }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            Toast.makeText(libContext, "Importing PDF…", Toast.LENGTH_SHORT).show()
+            Thread {
+                val doc = store.importPdf(uri)
+                Handler(Looper.getMainLooper()).post {
+                    onChanged()
+                    if (doc != null) nav.navigate("doc/${doc.id}")
+                    else Toast.makeText(libContext, "That PDF could not be imported.", Toast.LENGTH_SHORT).show()
+                }
+            }.start()
+        }
+    }
+    val shown = docs.filter {
+        when (filter) {
+            "Scans" -> true
+            "Edited" -> it.edited
+            "Starred" -> it.starred
+            else -> true
+        }
+    }
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
+        item {
+            Spacer(Modifier.height(18.dp))
+            Kicker("Library")
+            Text("Your files", style = MaterialTheme.typography.displayMedium.copy(fontSize = 34.sp), modifier = Modifier.padding(vertical = 10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("All", "Scans", "Edited", "Starred").forEach { f ->
+                    FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f) },
+                        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Gold, selectedLabelColor = GoldInk, containerColor = CardBg, labelColor = Muted),
+                        border = FilterChipDefaults.filterChipBorder(enabled = true, selected = filter == f, selectedBorderColor = Gold, borderColor = Line, selectedBorderWidth = 1.dp, borderWidth = 1.dp))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(onClick = { importLauncher.launch("application/pdf") }, shape = RoundedCornerShape(999.dp)) { Text("Import PDF") }
+            Spacer(Modifier.height(8.dp))
+        }
+        if (shown.isEmpty()) {
+            item { Text(if (docs.isEmpty()) "Nothing here yet. Scan a document and it will appear in this library." else "Nothing in $filter yet.", color = Muted, fontSize = 14.sp, modifier = Modifier.padding(top = 18.dp)) }
+        }
+        items(shown, key = { it.id }) { doc ->
+            Row(Modifier.fillMaxWidth().clickable { nav.navigate("doc/${doc.id}") }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Thumb(doc.pages.firstOrNull(), 40.dp, 52.dp)
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(doc.name, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${doc.pages.size} page${if (doc.pages.size == 1) "" else "s"} · ${whenText(doc.createdAt)}", color = Muted, fontSize = 12.5.sp)
+                }
+                IconButton(onClick = { store.toggleStar(doc.id); onChanged() }) {
+                    Text(if (doc.starred) "★" else "☆", color = if (doc.starred) GoldDeep else Line, fontSize = 21.sp)
+                }
+            }
+            HorizontalDivider(color = Line)
+        }
+    }
+}
+
+@Composable
+fun ToolsScreen(nav: NavController, onScanNew: () -> Unit = {}) {
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
+        item {
+            Spacer(Modifier.height(18.dp))
+            Kicker("Tools")
+            Text("All tools", style = MaterialTheme.typography.displayMedium.copy(fontSize = 34.sp), modifier = Modifier.padding(vertical = 10.dp))
+        }
+        val sections = listOf(
+            "Scanner" to listOf("Scan to PDF" to true),
+            "Studio" to listOf("PDF Editor" to false),
+            "Organize" to listOf("Merge PDF" to false, "Split PDF" to false, "Rotate PDF" to false),
+            "Compress" to listOf("Compress PDF" to false),
+            "Convert" to listOf("Image to PDF" to false, "PDF to JPG" to false),
+            "Secure" to listOf("Protect PDF" to false, "Sign PDF" to false)
+        )
+        sections.forEach { (title, tools) ->
+            item { Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 20.dp, bottom = 6.dp)) }
+            items(tools) { (name, live) ->
+                Row(Modifier.fillMaxWidth().then(if (live) Modifier.clickable { onScanNew() } else Modifier).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(name, fontSize = 16.sp, modifier = Modifier.weight(1f), color = if (live) Ink else Muted)
+                    if (live) Text("→", color = Muted) else Text("Next update", color = GoldDeep, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+                HorizontalDivider(color = Line)
+            }
+        }
+    }
+}
+
+@Composable
+fun MeScreen(docCount: Int) {
+    val ctx = LocalContext.current
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
+        item {
+            Spacer(Modifier.height(18.dp))
+            Kicker("PDF Speed")
+            Text("Me", style = MaterialTheme.typography.displayMedium.copy(fontSize = 34.sp), modifier = Modifier.padding(vertical = 10.dp))
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = CardBg), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("PDF Speed — documents, at speed. A scanner-first PDF toolkit built by AsadWebs. Everything is created on this phone; nothing is uploaded.")
+                    Spacer(Modifier.height(10.dp))
+                    Text("Documents in library: $docCount", color = Muted, fontSize = 13.sp)
+                    Text("Version 1.0", color = Muted, fontSize = 13.sp)
+        item {
+            Spacer(Modifier.height(18.dp))
+            Kicker("Diagnostics")
+            var traceText by remember { mutableStateOf(Trace.tail(60)) }
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = CardBg), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Session log", style = MaterialTheme.typography.titleLarge)
+                    Text("Every step the app takes is recorded here — it survives even if the app is closed by the system. If anything closes unexpectedly, share this log.", color = Muted, fontSize = 12.5.sp, modifier = Modifier.padding(vertical = 6.dp))
+                    Box(Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState()).background(Color(0xFFF3EEE2), RoundedCornerShape(10.dp)).padding(10.dp)) {
+                        Text(traceText, fontSize = 10.5.sp, lineHeight = 14.sp)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "PDF Speed session log")
+                                putExtra(Intent.EXTRA_TEXT, Trace.read())
+                            }
+                            ctx.startActivity(Intent.createChooser(intent, "Share session log"))
+                        }, shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) { Text("Share log") }
+                        OutlinedButton(onClick = { traceText = Trace.tail(60) }, shape = RoundedCornerShape(999.dp)) { Text("Refresh") }
+                        TextButton(onClick = { Trace.clear(); traceText = Trace.tail(60) }) { Text("Clear") }
+                    }
+                }
+            }
+        }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavController, onAddPage: () -> Unit = {}) {
+    val context = LocalContext.current
+    var confirmDelete by remember { mutableStateOf(false) }
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 40.dp)) {
+        item {
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { nav.popBackStack() }) { Text("← Back", color = GoldDeep, fontWeight = FontWeight.SemiBold) }
+            }
+            Text(doc.name, style = MaterialTheme.typography.headlineMedium)
+            Text("${doc.pages.size} page${if (doc.pages.size == 1) "" else "s"} · ${whenText(doc.createdAt)}", color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+        }
+        itemsIndexed(doc.pages) { idx, path ->
+            Card(shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = CardBg), modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+                Column {
+                    Thumb(path, null, 300.dp, Modifier.fillMaxWidth(), sample = 1)
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Page ${idx + 1}", color = Muted, fontSize = 12.5.sp, modifier = Modifier.padding(start = 8.dp))
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { store.movePage(doc.id, idx, -1); onChanged() }, enabled = idx > 0) { Text("↑ Up") }
+                        TextButton(onClick = { store.movePage(doc.id, idx, 1); onChanged() }, enabled = idx < doc.pages.size - 1) { Text("↓ Down") }
+                        TextButton(onClick = { store.deletePage(doc.id, idx); onChanged() }, enabled = doc.pages.size > 1) { Text("Remove", color = Color(0xFFB3352B)) }
+                    }
+                }
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onAddPage, shape = RoundedCornerShape(999.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk), modifier = Modifier.weight(1f)) { Text("Add page") }
+                OutlinedButton(onClick = {
+                    val pdf = store.exportPdf(doc)
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdf)
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/pdf"; putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Share PDF"))
+                }, shape = RoundedCornerShape(999.dp), modifier = Modifier.weight(1f)) { Text("Export PDF") }
+            }
+            Spacer(Modifier.height(10.dp))
+            TextButton(onClick = { confirmDelete = true }) { Text("Delete document", color = Color(0xFFB3352B)) }
+        }
+    }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this document?") },
+            text = { Text("“${doc.name}” and its ${doc.pages.size} page(s) will be removed from this phone.") },
+            confirmButton = { TextButton(onClick = { store.delete(doc.id); onChanged(); confirmDelete = false; nav.popBackStack() }) { Text("Delete", color = Color(0xFFB3352B)) } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } }
+        )
+    }
+}
+
+@Composable
+fun Thumb(path: String?, width: androidx.compose.ui.unit.Dp?, height: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier, sample: Int = 4) {
+    val bmp = remember(path) {
+        path?.let {
+            try {
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                BitmapFactory.decodeFile(it, opts)?.asImageBitmap()
+            } catch (e: Exception) { null }
+        }
+    }
+    Box(modifier.then(if (width != null) Modifier.size(width, height) else Modifier.height(height))
+        .clip(RoundedCornerShape(6.dp)).background(CardBg), contentAlignment = Alignment.Center) {
+        if (bmp != null) Image(bmp, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        else Text("📄", fontSize = 22.sp)
+    }
+}
+
+fun whenText(ts: Long): String {
+    val cal = Calendar.getInstance(); val now = cal.timeInMillis
+    val dayMs = 24 * 60 * 60 * 1000L
+    return when {
+        SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(ts)) == SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(now)) -> "Today"
+        now - ts < 2 * dayMs && SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(ts)) ==
+            SimpleDateFormat("yyyyMMdd", Locale.US).format(Date(now - dayMs)) -> "Yesterday"
+        else -> SimpleDateFormat("EEEE", Locale.getDefault()).format(Date(ts))
+    }
+}
+
+
+════════════════════════════════════════════════════════
+FILE: app/src/main/java/com/asadwebs/pdfspeed/scan/ScannerScreen.kt
+════════════════════════════════════════════════════════
+
+package com.asadwebs.pdfspeed.scan
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.PointF
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.asadwebs.pdfspeed.data.Trace
+import com.asadwebs.pdfspeed.ui.Gold
+import com.asadwebs.pdfspeed.data.Trace
+import com.asadwebs.pdfspeed.ui.GoldInk
+import com.asadwebs.pdfspeed.ui.Ink
+import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.Executors
+
+/** What is being scanned: drives the on-screen guide, the two-sided ID flow,
+ *  the book-spread split, and the filter Review starts with. */
+data class ScanMode(val id: String, val label: String, val guideAspect: Float? = null)
+
+val SCAN_MODES = listOf(
+    ScanMode("doc", "Document"),
+    ScanMode("id", "ID Card", 1.586f),
+    ScanMode("book", "Book"),
+    ScanMode("receipt", "Receipt"),
+    ScanMode("whiteboard", "Whiteboard"),
+    ScanMode("passport", "Passport", 1.42f),
+    ScanMode("card", "Card", 1.586f)
+)
+
+fun modeFilter(modeId: String): Imaging.ScanFilter = when (modeId) {
+    "receipt" -> Imaging.ScanFilter.GRAY
+    "passport" -> Imaging.ScanFilter.ORIGINAL
+    else -> Imaging.ScanFilter.MAGIC
+}
+
+private class CapHolder {
+    var capture: ImageCapture? = null
+    var analysis: ImageAnalysis? = null
+    @Volatile var busy: Boolean = false
+    @Volatile var frozen: Boolean = false
+    @Volatile var active: Boolean = true
+    @Volatile var resumed: Boolean = false
+}
+
+private class Stab {
+    var last: Array<PointF>? = null
+    var since: Long = 0
+    var lastRun: Long = 0
+    var hadFound: Boolean = false
+}
+
+/** CameraX scanner with live edge detection and steady-frame auto-capture.
+ *  Binding is lifecycle-safe: it (re)binds on resume and unbinds on dispose,
+ *  so coming back from Review never shows a dead black preview. Capture
+ *  callbacks always run on the main executor (an earlier crash came from
+ *  navigating off a background thread). */
+@Composable
+fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backSide: Boolean = false) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var hasPermission by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+    }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasPermission = it }
+    LaunchedEffect(Unit) { if (!hasPermission) launcher.launch(Manifest.permission.CAMERA) }
+
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    var mode by remember { mutableStateOf(SCAN_MODES[0]) }
+    var torch by remember { mutableStateOf(false) }
+    var grid by remember { mutableStateOf(false) }
+    var autoCap by remember { mutableStateOf(true) }
+    var liveCorners by remember { mutableStateOf<Array<PointF>?>(null) }
+    val capHolder = remember { CapHolder() }
+    val stab = remember { Stab() }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    DisposableEffect(Unit) { onDispose { analysisExecutor.shutdown() } }
+
+    fun capture() {
+        if (!capHolder.active) { Trace.log("capture() ignored — scanner inactive"); return }
+        Trace.log("capture() called busy=${capHolder.busy} auto will follow")
+        val cap = capHolder.capture ?: run {
+            Toast.makeText(context, "Camera is starting… one moment.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (capHolder.busy) return
+        capHolder.busy = true
+        val out = File(context.cacheDir, "capture_${System.currentTimeMillis()}.jpg")
+        val options = ImageCapture.OutputFileOptions.Builder(out).build()
+        try {
+        cap.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
+            override fun onImageSaved(result: ImageCapture.OutputFileResults) {
+                Trace.log("capture saved -> review (mode=${mode.id})")
+                capHolder.frozen = true
+                onCaptured(out, mode.id)
+            }
+            override fun onError(exception: ImageCaptureException) {
+                Trace.log("capture ERROR ${exception.imageCaptureError}: ${exception.message}")
+                capHolder.busy = false
+                Toast.makeText(context, "Capture failed: ${exception.message}", Toast.LENGTH_SHORT).show()
+            }
+        })
+        } catch (e: Exception) {
+            capHolder.busy = false
+            Toast.makeText(context, "Camera is busy — one moment.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val gallery = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        Thread {
+            try {
+                val f = File(context.cacheDir, "import_${System.currentTimeMillis()}.jpg")
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(f).use { input.copyTo(it) }
+                } ?: throw IllegalStateException("Could not open that image")
+                Handler(Looper.getMainLooper()).post { onCaptured(f, mode.id) }
+            } catch (e: Exception) {
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(context, "Could not import that image.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
+    DisposableEffect(previewView, hasPermission, lifecycleOwner) {
+        val pv = previewView
+        if (pv == null || !hasPermission) return@DisposableEffect onDispose { }
+        var provider: ProcessCameraProvider? = null
+        var bound = false
+        var attempts = 0
+        fun bind() {
+            val prov = provider ?: return
+            try {
+                val preview = Preview.Builder().build().also { it.surfaceProvider = pv.surfaceProvider }
+                val capture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .build()
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                capHolder.analysis = analysis
+                analysis.setAnalyzer(analysisExecutor) { proxy ->
+                    try {
+                        val now = System.currentTimeMillis()
+                        if (now - stab.lastRun >= 350 && !capHolder.frozen) {
+                            stab.lastRun = now
+                            val gray = Imaging.yuvToGray(proxy)
+                            val found = if (gray != null) Imaging.detectCorners(Imaging.downscaleTo(gray, 360)) else null
+                            liveCorners = found
+                            if ((found != null) != stab.hadFound) {
+                                stab.hadFound = found != null
+                                Trace.log(if (found != null) "live detection: FOUND" else "live detection: lost")
+                            }
+                            if (found == null) {
+                                stab.last = null; stab.since = 0
+                            } else {
+                                val prev = stab.last
+                                val stable = prev != null && (0 until 4).all { i ->
+                                    kotlin.math.abs(found[i].x - prev[i].x) + kotlin.math.abs(found[i].y - prev[i].y) < 0.02f
+                                }
+                                if (stable) {
+                                    if (stab.since == 0L) stab.since = now
+                                    if (autoCap && capHolder.active && capHolder.resumed && now - stab.since > 900 && !capHolder.busy) {
+                                        Trace.log("auto-capture firing")
+                                        Handler(Looper.getMainLooper()).post { capture() }
+                                    }
+                                } else {
+                                    stab.since = 0
+                                }
+                                stab.last = found
+                            }
+                        }
+                    } catch (e: Exception) { /* next frame */ }
+                    finally { proxy.close() }
+                }
+                prov.unbindAll()
+                val cam = prov.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture, analysis)
+                camera = cam
+                capHolder.capture = capture
+                if (torch) cam.cameraControl.enableTorch(true)
+                bound = true
+                Trace.log("camera bound OK")
+            } catch (e: Exception) {
+                Trace.log("bind FAILED (${e.javaClass.simpleName}): ${e.message}")
+                bound = false
+                attempts++
+                if (attempts <= 2) {
+                    pv.postDelayed({ if (!bound) bind() }, 600)
+                } else {
+                    Toast.makeText(context, "Camera could not start. Please close and reopen the scanner.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        val future = ProcessCameraProvider.getInstance(context)
+        future.addListener({
+            provider = try { future.get() } catch (e: Exception) { null }
+            bind()
+        }, ContextCompat.getMainExecutor(context))
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                capHolder.resumed = true
+                capHolder.busy = false
+                capHolder.frozen = false
+                stab.last = null; stab.since = 0
+                Trace.log("scanner ON_RESUME (bound=$bound)")
+                if (!bound) bind()
+            }
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                capHolder.resumed = false
+                Trace.log("scanner ON_PAUSE")
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            Trace.log("scanner DISPOSED")
+            capHolder.active = false
+            capHolder.resumed = false
+            try { capHolder.analysis?.clearAnalyzer() } catch (e: Exception) { }
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            try { provider?.unbindAll() } catch (e: Exception) { }
+            bound = false
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (hasPermission) {
+            AndroidView(
+                factory = { ctx ->
+                    PreviewView(ctx).apply {
+                        scaleType = PreviewView.ScaleType.FILL_CENTER
+                        previewView = this
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+            Canvas(Modifier.fillMaxSize()) {
+                if (grid) {
+                    val third = Color.White.copy(alpha = 0.3f)
+                    drawLine(third, Offset(size.width / 3, 0f), Offset(size.width / 3, size.height), 1f)
+                    drawLine(third, Offset(2 * size.width / 3, 0f), Offset(2 * size.width / 3, size.height), 1f)
+                    drawLine(third, Offset(0f, size.height / 3), Offset(size.width, size.height / 3), 1f)
+                    drawLine(third, Offset(0f, 2 * size.height / 3), Offset(size.width, 2 * size.height / 3), 1f)
+                }
+                mode.guideAspect?.let { aspect ->
+                    var w = size.width * 0.88f
+                    var h = w / aspect
+                    if (h > size.height * 0.6f) { h = size.height * 0.6f; w = h * aspect }
+                    val left = (size.width - w) / 2
+                    val top = (size.height - h) / 2
+                    drawRoundRect(Gold, Offset(left, top), Size(w, h), CornerRadius(18f, 18f), style = Stroke(width = 3f))
+                }
+                liveCorners?.let { c ->
+                    val pts = c.map { Offset(it.x * size.width, it.y * size.height) }
+                    val path = Path().apply {
+                        moveTo(pts[0].x, pts[0].y)
+                        for (i in 1..3) lineTo(pts[i].x, pts[i].y)
+                        close()
+                    }
+                    drawPath(path, color = Gold.copy(alpha = 0.18f))
+                    drawPath(path, color = Gold, style = Stroke(width = 3f))
+                    pts.forEach { drawCircle(Color.White, 9f, it); drawCircle(Gold, 6f, it) }
+                }
+            }
+        } else {
+            Column(
+                Modifier.fillMaxSize().padding(32.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Camera permission is needed to scan.", color = Color.White, fontSize = 16.sp)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk)) {
+                    Text("Allow camera")
+                }
+            }
+        }
+
+        Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onClose) { Text("✕ Close", color = Color.White, fontWeight = FontWeight.SemiBold) }
+                Spacer(Modifier.weight(1f))
+                TogglePill("AUTO", autoCap) { autoCap = !autoCap }
+                Spacer(Modifier.width(6.dp))
+                TogglePill("⚡ Flash", torch) {
+                    torch = !torch
+                    camera?.cameraControl?.enableTorch(torch)
+                }
+                Spacer(Modifier.width(6.dp))
+                TogglePill("▦ Grid", grid) { grid = !grid }
+            }
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                SCAN_MODES.forEach { m ->
+                    FilterChip(
+                        selected = mode.id == m.id,
+                        onClick = { mode = m },
+                        label = { Text(m.label, fontSize = 12.5.sp) },
+                        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Gold, selectedLabelColor = GoldInk, containerColor = Color(0xCC262019), labelColor = Color(0xFFE8E2D4)),
+                        border = FilterChipDefaults.filterChipBorder(enabled = true, selected = mode.id == m.id, selectedBorderColor = Gold, borderColor = Color(0xFF4A4234), selectedBorderWidth = 1.dp, borderWidth = 1.dp)
+                    )
+                }
+            }
+        }
+
+        Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 128.dp)
+            .background(Color(0x66000000), RoundedCornerShape(999.dp)).padding(horizontal = 14.dp, vertical = 6.dp)) {
+            Text(
+                when {
+                    capHolder.busy -> "Capturing…"
+                    liveCorners != null && autoCap -> "Edges found — hold steady, capturing automatically"
+                    liveCorners != null -> "Edges found"
+                    mode.id == "id" && backSide -> "Front saved — now scan the BACK side"
+                    mode.id == "id" -> "Fill the frame with the card, front side first"
+                    mode.id == "book" -> "Photograph the open spread — it splits into 2 pages"
+                    else -> "Point at a document and tap capture"
+                },
+                color = Color.White, fontSize = 12.5.sp
+            )
+        }
+
+        Row(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 34.dp, start = 28.dp, end = 28.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = { gallery.launch("image/*") },
+                shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+            ) { Text("🖼 Gallery") }
+            Spacer(Modifier.weight(1f))
+            Button(
+                onClick = { capture() },
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk),
+                modifier = Modifier.size(74.dp).clip(CircleShape)
+            ) { Text("●", fontSize = 26.sp, color = Ink) }
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(104.dp))
+        }
+    }
+}
+
+@Composable
+private fun TogglePill(label: String, on: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(999.dp))
+            .background(if (on) Gold else Color(0xCC262019))
+            .clickable { onClick() }
+            .padding(horizontal = 13.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = if (on) GoldInk else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+
+════════════════════════════════════════════════════════
+FILE: app/src/main/java/com/asadwebs/pdfspeed/scan/Imaging.kt
+════════════════════════════════════════════════════════
+
+package com.asadwebs.pdfspeed.scan
+
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Matrix
+import android.graphics.PointF
+import android.media.ExifInterface
+import java.io.File
+import java.io.FileOutputStream
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+
+/** On-device scan imaging: EXIF-correct load, document corner detection,
+ *  perspective warp (per-pixel homography, bilinear), and filters.
+ *  The detection + warp + magic-colour math mirrors the proven AsadWebs
+ *  web scanner engine, ported to Kotlin. */
+object Imaging {
+
+    fun loadOriented(file: File): Bitmap {
+        val bmp = BitmapFactory.decodeFile(file.absolutePath)
+            ?: throw IllegalStateException("Could not read the captured image")
+        val exif = try { ExifInterface(file.absolutePath) } catch (e: Exception) { null }
+        val orientation = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            ?: ExifInterface.ORIENTATION_NORMAL
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+        }
+        return if (matrix.isIdentity) bmp
+        else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+    }
+
+    /** Downscales so the long edge is at most maxSide (returns src if already smaller). */
+    fun downscaleTo(src: Bitmap, maxSide: Int): Bitmap {
+        val longest = max(src.width, src.height)
+        if (longest <= maxSide) return src
+        val scale = maxSide.toFloat() / longest
+        return Bitmap.createScaledBitmap(src, (src.width * scale).toInt().coerceAtLeast(1), (src.height * scale).toInt().coerceAtLeast(1), true)
+    }
+
+    fun saveJpeg(bmp: Bitmap, file: File, quality: Int = 92) {
+        FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }
+    }
+
+    // ---------- corner detection ----------
+    // Dual-strategy detector at 480px analysis width:
+    //  A) luminance blob (Otsu region -> hull -> quad), both polarities
+    //  B) edge region (Sobel edges -> dilate -> background flood fill -> largest
+    //     enclosed region -> hull -> quad)
+    // Candidates are scored by area x fill x rectangularity; the best wins.
+
+    /** Returns [TL, TR, BR, BL] normalized 0..1, or null when no document quad is found. */
+    fun detectCorners(src: Bitmap): Array<PointF>? {
+        val dw = 480
+        val dh = max(1, (src.height * dw / src.width))
+        val small = Bitmap.createScaledBitmap(src, dw, dh, true)
+        val px = IntArray(dw * dh)
+        small.getPixels(px, 0, dw, 0, 0, dw, dh)
+        if (small !== src) small.recycle()
+        val n = dw * dh
+        var lum = FloatArray(n)
+        for (i in 0 until n) {
+            val c = px[i]
+            lum[i] = 0.2126f * ((c shr 16) and 0xFF) + 0.7152f * ((c shr 8) and 0xFF) + 0.0722f * (c and 0xFF)
+        }
+        val blr = FloatArray(n)
+        for (y in 0 until dh) for (x in 0 until dw) {
+            var acc = 0f; var cnt = 0
+            for (dy in -1..1) for (dx in -1..1) {
+                val sx = x + dx; val sy = y + dy
+                if (sx < 0 || sy < 0 || sx >= dw || sy >= dh) continue
+                acc += lum[sy * dw + sx]; cnt++
+            }
+            blr[y * dw + x] = acc / cnt
+        }
+        lum = blr
+
+        var best: Pair<Array<PointF>, Float>? = null
+        fun consider(cand: Pair<Array<PointF>, Float>?) {
+            if (cand != null && (best == null || cand.second > best!!.second)) best = cand
+        }
+        consider(blobQuad(lum, dw, dh, false))
+        consider(blobQuad(lum, dw, dh, true))
+        consider(edgeQuad(lum, dw, dh))
+
+        val rawQuad = best?.first ?: return null
+        val quad = refineQuadPx(lum, dw, dh, rawQuad)
+        var cx = 0f; var cy = 0f
+        for (p in quad) { cx += p.x; cy += p.y }
+        cx /= 4; cy /= 4
+        return quad.map { p ->
+            PointF((p.x + (cx - p.x) * 0.015f) / dw, (p.y + (cy - p.y) * 0.015f) / dh)
+        }.toTypedArray()
+    }
+
+    /** Snaps each quad edge onto the strongest nearby brightness step (the
+     *  paper's true edge), searching ±6% along the edge normal at three
+     *  points per edge and shifting by the median winning offset. Fixes the
+     *  "quad floats a few % off the page" overshoot on busy backgrounds. */
+    private fun refineQuadPx(lum: FloatArray, w: Int, h: Int, quad: Array<PointF>): Array<PointF> {
+        fun sample(cx: Float, cy: Float): Float {
+            val x = cx.toInt().coerceIn(0, w - 1); val y = cy.toInt().coerceIn(0, h - 1)
+            return lum[y * w + x]
+        }
+        fun patchAvg(cx: Float, cy: Float): Float {
+            var acc = 0f; var cnt = 0
+            for (dy in -2..2) for (dx in -2..2) { acc += sample(cx + dx, cy + dy); cnt++ }
+            return acc / cnt
+        }
+        val q = Array(4) { PointF(quad[it].x, quad[it].y) }
+        var ccx = 0f; var ccy = 0f
+        for (p in q) { ccx += p.x; ccy += p.y }
+        ccx /= 4; ccy /= 4
+        val win = 0.06f * min(w, h)
+        for (e in 0 until 4) {
+            val a = q[e]; val b = q[(e + 1) % 4]
+            val ex = b.x - a.x; val ey = b.y - a.y
+            val len = max(1f, hypot(ex, ey))
+            var nx = -ey / len; var ny = ex / len
+            val mx = (a.x + b.x) / 2; val my = (a.y + b.y) / 2
+            if ((mx + nx - ccx) * nx + (my + ny - ccy) * ny < 0) { nx = -nx; ny = -ny }
+            val offsets = ArrayList<Float>()
+            for (frac in floatArrayOf(0.3f, 0.5f, 0.7f)) {
+                val px0 = a.x + ex * frac; val py0 = a.y + ey * frac
+                var bestT = 0f; var bestG = -1f
+                var t = -win
+                while (t <= win) {
+                    val g = abs(patchAvg(px0 + nx * (t + 2), py0 + ny * (t + 2)) - patchAvg(px0 + nx * (t - 2), py0 + ny * (t - 2)))
+                    if (g > bestG) { bestG = g; bestT = t }
+                    t += 2f
+                }
+                if (bestG > 6f) offsets.add(bestT)
+            }
+            if (offsets.isNotEmpty()) {
+                offsets.sort()
+                val shift = offsets[offsets.size / 2]
+                a.x += nx * shift; a.y += ny * shift
+                b.x += nx * shift; b.y += ny * shift
+            }
+        }
+        return q
+    }
+
+    /** Validates an ordered quad (analysis px) and returns it with a score, or null. */
+    private fun validateQuad(ord: List<IntArray>, insideCount: (Array<PointF>) -> Int, w: Int, h: Int): Pair<Array<PointF>, Float>? {
+        var area = 0f
+        for (i in 0 until 4) {
+            val a = ord[i]; val b = ord[(i + 1) % 4]
+            area += (a[0] * b[1] - b[0] * a[1]).toFloat()
+        }
+        area = abs(area) / 2
+        val frac = area / (w * h)
+        if (frac < 0.08f || frac > 0.97f) return null
+        var sign = 0
+        val sides = DoubleArray(4)
+        for (i in 0 until 4) {
+            val p0 = ord[i]; val p1 = ord[(i + 1) % 4]; val p2 = ord[(i + 2) % 4]
+            val cr = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0])
+            if (i == 0) sign = cr
+            else if ((cr < 0) != (sign < 0) || abs(cr) < 1) return null
+            sides[i] = hypot((p1[0] - p0[0]).toDouble(), (p1[1] - p0[1]).toDouble())
+            if (sides[i] < max(w, h) * 0.10) return null
+        }
+        val quadF = ord.map { PointF(it[0].toFloat(), it[1].toFloat()) }.toTypedArray()
+        val fill = insideCount(quadF) / max(1f, area)
+        if (fill < 0.50f) return null
+        // rectangularity: opposite sides similar + diagonals near-equal (true of a
+        // photographed rectangle, not of a random bright blob)
+        val d1 = hypot((ord[2][0] - ord[0][0]).toDouble(), (ord[2][1] - ord[0][1]).toDouble())
+        val d2 = hypot((ord[3][0] - ord[1][0]).toDouble(), (ord[3][1] - ord[1][1]).toDouble())
+        val diagRatio = min(d1, d2) / max(1.0, max(d1, d2))
+        val sideRatio = min(min(sides[0], sides[2]) / max(1.0, max(sides[0], sides[2])),
+                            min(sides[1], sides[3]) / max(1.0, max(sides[1], sides[3])))
+        val rect = (0.5 + 0.5 * diagRatio) * (0.5 + 0.5 * sideRatio)
+        return Pair(quadF, (frac * fill * rect).toFloat())
+    }
+
+    private fun blobQuad(lum: FloatArray, w: Int, h: Int, inv: Boolean): Pair<Array<PointF>, Float>? {
+        val n = w * h
+        val hist = FloatArray(256); var sum = 0f
+        for (i in 0 until n) {
+            var v = lum[i].toInt(); if (v < 0) v = 0; if (v > 255) v = 255
+            hist[v]++; sum += v
+        }
+        var sumB = 0f; var wB = 0f; var maxVar = -1f; var thr = 127
+        for (i in 0 until 256) {
+            wB += hist[i]; if (wB == 0f) continue
+            val wF = n - wB; if (wF == 0f) break
+            sumB += i * hist[i]
+            val mB = sumB / wB; val mF = (sum - sumB) / wF
+            val between = wB * wF * (mB - mF) * (mB - mF)
+            if (between > maxVar) { maxVar = between; thr = i }
+        }
+        fun on(x: Int, y: Int): Boolean {
+            val l = lum[y * w + x]
+            return if (inv) l < thr else l > thr
+        }
+        val pts = ArrayList<IntArray>(); var cnt = 0
+        for (y in 0 until h) for (x in 0 until w) {
+            if (!on(x, y)) continue
+            cnt++
+            if (x == 0 || y == 0 || x == w - 1 || y == h - 1 || !on(x - 1, y) || !on(x + 1, y) || !on(x, y - 1) || !on(x, y + 1))
+                pts.add(intArrayOf(x, y))
+        }
+        if (pts.size < 40 || cnt < n * 0.05 || cnt > n * 0.985) return null
+        val hull = convexHull(pts)
+        if (hull.size < 4) return null
+        val q4 = simplifyTo4(hull) ?: return null
+        val ord = orderCorners(q4)
+        return validateQuad(ord, { q ->
+            var inside = 0
+            for (y in 0 until h) for (x in 0 until w) {
+                if (!on(x, y)) continue
+                var pos = false; var neg = false
+                for (i in 0 until 4) {
+                    val a = q[i]; val b = q[(i + 1) % 4]
+                    val cr2 = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+                    if (cr2 > 0) pos = true else if (cr2 < 0) neg = true
+                }
+                if (!(pos && neg)) inside++
+            }
+            inside
+        }, w, h)
+    }
+
+    private fun edgeQuad(lum: FloatArray, w: Int, h: Int): Pair<Array<PointF>, Float>? {
+        val n = w * h
+        // Sobel magnitude
+        val mag = FloatArray(n)
+        var maxMag = 0f
+        for (y in 1 until h - 1) for (x in 1 until w - 1) {
+            val i = y * w + x
+            val gx = -lum[i - w - 1] - 2 * lum[i - 1] - lum[i + w - 1] + lum[i - w + 1] + 2 * lum[i + 1] + lum[i + w + 1]
+            val gy = -lum[i - w - 1] - 2 * lum[i - w] - lum[i - w + 1] + lum[i + w - 1] + 2 * lum[i + w] + lum[i + w + 1]
+            val m = abs(gx) + abs(gy)
+            mag[i] = m; if (m > maxMag) maxMag = m
+        }
+        if (maxMag <= 0f) return null
+        var edge = BooleanArray(n) { mag[it] > maxMag * 0.22f }
+        // dilate twice to close small gaps in the document outline
+        repeat(2) {
+            val d = BooleanArray(n)
+            for (y in 0 until h) for (x in 0 until w) {
+                if (!edge[y * w + x]) continue
+                for (dy in -1..1) for (dx in -1..1) {
+                    val sx = x + dx; val sy = y + dy
+                    if (sx in 0 until w && sy in 0 until h) d[sy * w + sx] = true
+                }
+            }
+            edge = d
+        }
+        // background = flood fill from the border over non-edge pixels
+        val bg = BooleanArray(n)
+        val stack = IntArray(n); var sp = 0
+        fun push(i: Int) { if (!bg[i] && !edge[i]) { bg[i] = true; stack[sp++] = i } }
+        for (x in 0 until w) { push(x); push((h - 1) * w + x) }
+        for (y in 0 until h) { push(y * w); push(y * w + w - 1) }
+        while (sp > 0) {
+            val i = stack[--sp]; val x = i % w; val y = i / w
+            if (x > 0) push(i - 1)
+            if (x < w - 1) push(i + 1)
+            if (y > 0) push(i - w)
+            if (y < h - 1) push(i + w)
+        }
+        // largest connected component of the enclosed (non-background, non-edge) area
+        val region = BooleanArray(n) { !bg[it] && !edge[it] }
+        val seen = BooleanArray(n)
+        var bestComp: ArrayList<IntArray>? = null
+        var bestCount = 0
+        val compStack = IntArray(n)
+        for (start in 0 until n) {
+            if (!region[start] || seen[start]) continue
+            var csp = 0; compStack[csp++] = start; seen[start] = true
+            val boundary = ArrayList<IntArray>(); var count = 0
+            while (csp > 0) {
+                val i = compStack[--csp]; val x = i % w; val y = i / w; count++
+                val isB = x == 0 || y == 0 || x == w - 1 || y == h - 1 ||
+                    !region[i - 1] || !region[i + 1] || !region[i - w] || !region[i + w]
+                if (isB) boundary.add(intArrayOf(x, y))
+                if (x > 0 && region[i - 1] && !seen[i - 1]) { seen[i - 1] = true; compStack[csp++] = i - 1 }
+                if (x < w - 1 && region[i + 1] && !seen[i + 1]) { seen[i + 1] = true; compStack[csp++] = i + 1 }
+                if (y > 0 && region[i - w] && !seen[i - w]) { seen[i - w] = true; compStack[csp++] = i - w }
+                if (y < h - 1 && region[i + w] && !seen[i + w]) { seen[i + w] = true; compStack[csp++] = i + w }
+            }
+            if (count > n * 0.05 && count > bestCount) {
+                bestComp = boundary
+                bestCount = count
+            }
+        }
+        val boundary = bestComp ?: return null
+        if (boundary.size < 40) return null
+        val hull = convexHull(boundary)
+        if (hull.size < 4) return null
+        val q4 = simplifyTo4(hull) ?: return null
+        val ord = orderCorners(q4)
+        return validateQuad(ord, { q ->
+            var inside = 0
+            for (y in 0 until h) for (x in 0 until w) {
+                if (!region[y * w + x]) continue
+                var pos = false; var neg = false
+                for (i in 0 until 4) {
+                    val a = q[i]; val b = q[(i + 1) % 4]
+                    val cr2 = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+                    if (cr2 > 0) pos = true else if (cr2 < 0) neg = true
+                }
+                if (!(pos && neg)) inside++
+            }
+            inside
+        }, w, h)
+    }
+
+
+
+    private fun cross(o: IntArray, a: IntArray, b: IntArray): Int =
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    private fun convexHull(input: List<IntArray>): List<IntArray> {
+        val pts = input.sortedWith(compareBy({ it[0] }, { it[1] }))
+        if (pts.size < 3) return pts
+        val lo = ArrayList<IntArray>()
+        for (pt in pts) {
+            while (lo.size >= 2 && cross(lo[lo.size - 2], lo[lo.size - 1], pt) <= 0) lo.removeAt(lo.size - 1)
+            lo.add(pt)
+        }
+        val hi = ArrayList<IntArray>()
+        for (i in pts.indices.reversed()) {
+            val pt = pts[i]
+            while (hi.size >= 2 && cross(hi[hi.size - 2], hi[hi.size - 1], pt) <= 0) hi.removeAt(hi.size - 1)
+            hi.add(pt)
+        }
+        lo.removeAt(lo.size - 1); hi.removeAt(hi.size - 1)
+        return lo + hi
+    }
+
+    private fun simplifyTo4(input: List<IntArray>): List<IntArray>? {
+        val pts = input.toMutableList()
+        if (pts.size < 4) return null
+        while (pts.size > 4) {
+            var best = -1; var bestD = 1e18
+            for (i in pts.indices) {
+                val a = pts[(i + pts.size - 1) % pts.size]; val b = pts[i]; val c = pts[(i + 1) % pts.size]
+                val dx = (c[0] - a[0]).toDouble(); val dy = (c[1] - a[1]).toDouble()
+                val l = max(1.0, hypot(dx, dy))
+                val dist = abs((b[0] - a[0]) * dy - (b[1] - a[1]) * dx) / l
+                if (dist < bestD) { bestD = dist; best = i }
+            }
+            pts.removeAt(best)
+        }
+        return pts
+    }
+
+    private fun orderCorners(q: List<IntArray>): List<IntArray> {
+        var tl = 0; var tr = 0; var br = 0; var bl = 0
+        var sMin = Int.MAX_VALUE; var sMax = Int.MIN_VALUE; var dMax = Int.MIN_VALUE; var dMin = Int.MAX_VALUE
+        for (i in 0 until 4) {
+            val sm = q[i][0] + q[i][1]; val df = q[i][0] - q[i][1]
+            if (sm < sMin) { sMin = sm; tl = i }
+            if (sm > sMax) { sMax = sm; br = i }
+            if (df > dMax) { dMax = df; tr = i }
+            if (df < dMin) { dMin = df; bl = i }
+        }
+        val idx = listOf(tl, tr, br, bl)
+        if (idx.toSet().size < 4) {
+            val cx = q.sumOf { it[0] } / 4.0; val cy = q.sumOf { it[1] } / 4.0
+            val sorted = q.sortedBy { kotlin.math.atan2(it[1] - cy, it[0] - cx) }
+            var st = 0
+            for (i in 0 until 4) if (sorted[i][0] + sorted[i][1] < sorted[st][0] + sorted[st][1]) st = i
+            return listOf(sorted[st], sorted[(st + 1) % 4], sorted[(st + 2) % 4], sorted[(st + 3) % 4])
+        }
+        return listOf(q[tl], q[tr], q[br], q[bl])
+    }
+
+    // ---------- perspective warp (port of homography + per-pixel warp) ----------
+
+    private fun homography(dst: Array<PointF>, srcp: Array<PointF>): DoubleArray? {
+        val a = Array(8) { DoubleArray(8) }; val b = DoubleArray(8)
+        for (i in 0 until 4) {
+            val x = dst[i].x.toDouble(); val y = dst[i].y.toDouble()
+            val sx = srcp[i].x.toDouble(); val sy = srcp[i].y.toDouble()
+            a[i * 2] = doubleArrayOf(x, y, 1.0, 0.0, 0.0, 0.0, -x * sx, -y * sx); b[i * 2] = sx
+            a[i * 2 + 1] = doubleArrayOf(0.0, 0.0, 0.0, x, y, 1.0, -x * sy, -y * sy); b[i * 2 + 1] = sy
+        }
+        val n = 8
+        for (c in 0 until n) {
+            var piv = c
+            for (r in c + 1 until n) if (abs(a[r][c]) > abs(a[piv][c])) piv = r
+            if (abs(a[piv][c]) < 1e-12) return null
+            if (piv != c) {
+                val t = a[c]; a[c] = a[piv]; a[piv] = t
+                val tb = b[c]; b[c] = b[piv]; b[piv] = tb
+            }
+            for (r in 0 until n) {
+                if (r == c) continue
+                val f = a[r][c] / a[c][c]
+                if (f == 0.0) continue
+                for (rr in c until n) a[r][rr] -= f * a[c][rr]
+                b[r] -= f * b[c]
+            }
+        }
+        return DoubleArray(n) { b[it] / a[it][it] }
+    }
+
+    /** Warps the quad (normalized 0..1, TL TR BR BL) into a flat rectangle. */
+    fun warp(src: Bitmap, corners01: Array<PointF>): Bitmap {
+        val sw = src.width; val sh = src.height
+        val c = corners01.map { PointF(it.x * sw, it.y * sh) }.toTypedArray()
+        val top = hypot((c[1].x - c[0].x).toDouble(), (c[1].y - c[0].y).toDouble())
+        val bottom = hypot((c[2].x - c[3].x).toDouble(), (c[2].y - c[3].y).toDouble())
+        val left = hypot((c[3].x - c[0].x).toDouble(), (c[3].y - c[0].y).toDouble())
+        val right = hypot((c[2].x - c[1].x).toDouble(), (c[2].y - c[1].y).toDouble())
+        var outW = max(top, bottom).toInt().coerceAtLeast(1)
+        var outH = max(left, right).toInt().coerceAtLeast(1)
+        val cap = 2400
+        val longest = max(outW, outH)
+        if (longest > cap) {
+            val s = cap.toDouble() / longest
+            outW = (outW * s).toInt().coerceAtLeast(1); outH = (outH * s).toInt().coerceAtLeast(1)
+        }
+        val dstRect = arrayOf(PointF(0f, 0f), PointF(outW.toFloat(), 0f), PointF(outW.toFloat(), outH.toFloat()), PointF(0f, outH.toFloat()))
+        val h = homography(dstRect, c) ?: return src
+        val srcPx = IntArray(sw * sh)
+        src.getPixels(srcPx, 0, sw, 0, 0, sw, sh)
+        val outPx = IntArray(outW * outH)
+        for (y in 0 until outH) {
+            for (x in 0 until outW) {
+                val den = h[6] * x + h[7] * y + 1.0
+                val sx = (h[0] * x + h[1] * y + h[2]) / den
+                val sy = (h[3] * x + h[4] * y + h[5]) / den
+                outPx[y * outW + x] = bilinear(srcPx, sw, sh, sx, sy)
+            }
+        }
+        val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        out.setPixels(outPx, 0, outW, 0, 0, outW, outH)
+        return out
+    }
+
+    private fun bilinear(px: IntArray, w: Int, h: Int, fx: Double, fy: Double): Int {
+        if (fx < 0 || fy < 0 || fx > w - 1 || fy > h - 1) return 0xFF000000.toInt()
+        val x0 = fx.toInt(); val y0 = fy.toInt()
+        val x1 = min(x0 + 1, w - 1); val y1 = min(y0 + 1, h - 1)
+        val dx = fx - x0; val dy = fy - y0
+        fun chan(c00: Int, c10: Int, c01: Int, c11: Int, shift: Int): Int {
+            val v00 = (c00 shr shift) and 0xFF; val v10 = (c10 shr shift) and 0xFF
+            val v01 = (c01 shr shift) and 0xFF; val v11 = (c11 shr shift) and 0xFF
+            val top = v00 + (v10 - v00) * dx; val bot = v01 + (v11 - v01) * dx
+            return (top + (bot - top) * dy).toInt().coerceIn(0, 255)
+        }
+        val c00 = px[y0 * w + x0]; val c10 = px[y0 * w + x1]; val c01 = px[y1 * w + x0]; val c11 = px[y1 * w + x1]
+        val r = chan(c00, c10, c01, c11, 16)
+        val g = chan(c00, c10, c01, c11, 8)
+        val b = chan(c00, c10, c01, c11, 0)
+        return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+    }
+
+    // ---------- filters ----------
+
+    enum class ScanFilter { ORIGINAL, MAGIC, GRAY, BW }
+
+    fun applyFilter(src: Bitmap, filter: ScanFilter): Bitmap {
+        if (filter == ScanFilter.ORIGINAL) return src
+        val w = src.width; val h = src.height; val n = w * h
+        val px = IntArray(n)
+        src.getPixels(px, 0, w, 0, 0, w, h)
+        when (filter) {
+            ScanFilter.MAGIC -> magicStretch(px)
+            ScanFilter.GRAY -> for (i in 0 until n) {
+                val c = px[i]
+                val y = (0.2126f * ((c shr 16) and 0xFF) + 0.7152f * ((c shr 8) and 0xFF) + 0.0722f * (c and 0xFF)).toInt()
+                px[i] = (0xFF shl 24) or (y shl 16) or (y shl 8) or y
+            }
+            ScanFilter.BW -> {
+                // Adaptive threshold (local mean via two-pass box blur) - the
+                // scanner-style B&W that keeps text under uneven lighting,
+                // instead of one global threshold that floods shadows black.
+                val lumA = IntArray(n)
+                for (i in 0 until n) {
+                    val c = px[i]
+                    lumA[i] = (0.2126f * ((c shr 16) and 0xFF) + 0.7152f * ((c shr 8) and 0xFF) + 0.0722f * (c and 0xFF)).toInt()
+                }
+                val blurred = boxBlur(lumA, w, h, max(12, min(w, h) / 10))
+                for (i in 0 until n) {
+                    val v = if (lumA[i] > blurred[i] - 14) 255 else 0
+                    px[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+                }
+            }
+            ScanFilter.ORIGINAL -> { }
+        }
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(px, 0, w, 0, 0, w, h)
+        return out
+    }
+
+    /** Port of magicEnhance: per-channel 0.7% / 99.3% percentile stretch. */
+    private fun magicStretch(px: IntArray) {
+        val n = px.size
+        val hist = Array(3) { IntArray(256) }
+        for (i in 0 until n) {
+            val c = px[i]
+            hist[0][(c shr 16) and 0xFF]++; hist[1][(c shr 8) and 0xFF]++; hist[2][c and 0xFF]++
+        }
+        val lo = IntArray(3); val hi = IntArray(3) { 255 }
+        val tLo = n * 0.007; val tHi = n * 0.993
+        for (ch in 0 until 3) {
+            var acc = 0
+            for (v in 0 until 256) { acc += hist[ch][v]; if (acc >= tLo) { lo[ch] = v; break } }
+            acc = 0
+            for (v in 255 downTo 0) { acc += hist[ch][v]; if (acc >= n - tHi) { hi[ch] = v; break } }
+            if (hi[ch] - lo[ch] < 24) { lo[ch] = 0; hi[ch] = 255 }
+        }
+        for (i in 0 until n) {
+            val c = px[i]
+            val r = stretch((c shr 16) and 0xFF, lo[0], hi[0])
+            val g = stretch((c shr 8) and 0xFF, lo[1], hi[1])
+            val b = stretch(c and 0xFF, lo[2], hi[2])
+            px[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+    }
+
+    private fun stretch(v: Int, lo: Int, hi: Int): Int =
+        ((v - lo).toFloat() / (hi - lo) * 255).toInt().coerceIn(0, 255)
+
+    /** Separable box blur over an Int luminance plane (edge-clamped). */
+    private fun boxBlur(src: IntArray, w: Int, h: Int, radius: Int): IntArray {
+        val tmp = IntArray(src.size); val out = IntArray(src.size)
+        val win = radius * 2 + 1
+        for (y in 0 until h) {
+            var acc = 0
+            for (k in -radius..radius) acc += src[y * w + k.coerceIn(0, w - 1)]
+            for (x in 0 until w) {
+                tmp[y * w + x] = acc / win
+                val xa = (x - radius).coerceIn(0, w - 1); val xb = (x + radius + 1).coerceIn(0, w - 1)
+                acc += src[y * w + xb] - src[y * w + xa]
+            }
+        }
+        for (x in 0 until w) {
+            var acc = 0
+            for (k in -radius..radius) acc += tmp[k.coerceIn(0, h - 1) * w + x]
+            for (y in 0 until h) {
+                out[y * w + x] = acc / win
+                val ya = (y - radius).coerceIn(0, h - 1); val yb = (y + radius + 1).coerceIn(0, h - 1)
+                acc += tmp[yb * w + x] - tmp[ya * w + x]
+            }
+        }
+        return out
+    }
+
+    /** Rotates a bitmap by 90/180/270 degrees clockwise. */
+    fun rotate(src: Bitmap, degreesCW: Int): Bitmap {
+        val d = ((degreesCW % 360) + 360) % 360
+        if (d == 0) return src
+        val m = Matrix(); m.postRotate(d.toFloat())
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+    }
+
+    // ---------- live frames, ID cards, book spreads ----------
+
+    /** Grayscale bitmap from a CameraX YUV frame's luma plane, rotated upright. */
+    fun yuvToGray(image: androidx.camera.core.ImageProxy): Bitmap? {
+        return try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer.duplicate()
+            val rowStride = plane.rowStride
+            val w = image.width; val h = image.height
+            val pixels = IntArray(w * h)
+            val row = ByteArray(rowStride)
+            var i = 0
+            for (y in 0 until h) {
+                buffer.position(y * rowStride)
+                val n = minOf(rowStride, buffer.remaining())
+                buffer.get(row, 0, n)
+                for (x in 0 until w) {
+                    val v = row[x].toInt() and 0xFF
+                    pixels[i++] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+                }
+            }
+            var bmp = Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+            val rot = image.imageInfo.rotationDegrees
+            if (rot != 0) bmp = rotate(bmp, rot)
+            bmp
+        } catch (e: Exception) { null }
+    }
+
+    /** Front and back of an ID card composed onto one white A4-style page. */
+    fun composeIdPage(front: Bitmap, back: Bitmap): Bitmap {
+        val W = 1600; val H = 2263
+        val page = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(page)
+        canvas.drawColor(Color.WHITE)
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        val margin = 90f
+        val cardW = W - margin * 2
+        val fh = front.height * (cardW / front.width)
+        val bh = back.height * (cardW / back.width)
+        var top = (H - (fh + 70 + bh)) / 2
+        canvas.drawBitmap(front, null, RectF(margin, top, margin + cardW, top + fh), paint)
+        top += fh + 70
+        canvas.drawBitmap(back, null, RectF(margin, top, margin + cardW, top + bh), paint)
+        return page
+    }
+
+    /** A photographed book spread split into its two pages. */
+    fun splitSpread(bmp: Bitmap): Pair<Bitmap, Bitmap> {
+        val half = bmp.width / 2
+        return Bitmap.createBitmap(bmp, 0, 0, half, bmp.height) to
+            Bitmap.createBitmap(bmp, half, 0, bmp.width - half, bmp.height)
+    }
+}
+
+
+
+════════════════════════════════════════════════════════
+FILE: app/src/main/java/com/asadwebs/pdfspeed/scan/ReviewScreen.kt
+════════════════════════════════════════════════════════
+
+package com.asadwebs.pdfspeed.scan
+
+import android.graphics.Bitmap
+import android.graphics.PointF
+import android.widget.Toast
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.asadwebs.pdfspeed.data.Trace
+import com.asadwebs.pdfspeed.ui.Gold
+import com.asadwebs.pdfspeed.data.Trace
+import com.asadwebs.pdfspeed.ui.GoldInk
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+/** After-capture review: Adjust mode (photo + draggable detected corners with
+ *  a magnifier loupe) and Preview mode (warped + filtered result). Rotate
+ *  buttons re-run detection on the rotated photo. Done / Next page process
+ *  the page at up to 3000px and hand the finished JPEG back. */
+@Composable
+fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit, onRetake: () -> Unit, initialFilter: Imaging.ScanFilter = Imaging.ScanFilter.MAGIC) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var original by remember { mutableStateOf<Bitmap?>(null) }
+    var master by remember { mutableStateOf<Bitmap?>(null) }
+    var corners by remember { mutableStateOf<Array<PointF>?>(null) }
+    var detected by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf(initialFilter) }
+    var preview by remember { mutableStateOf<Bitmap?>(null) }
+    var mode by remember { mutableStateOf("adjust") }
+    var dragIdx by remember { mutableStateOf<Int?>(null) }
+    var busy by remember { mutableStateOf(false) }
+
+    fun defaultCorners(): Array<PointF> = arrayOf(
+        PointF(0.03f, 0.03f), PointF(0.97f, 0.03f),
+        PointF(0.97f, 0.97f), PointF(0.03f, 0.97f)
+    )
+
+    LaunchedEffect(imageFile) {
+        withContext(Dispatchers.IO) {
+            // Memory diet: ONE working bitmap at 3000px serves display,
+            // detection, rotation and the final warp. Keeping the full-res
+            // camera bitmap alive alongside it was the likely cause of the
+            // app closing when a page was processed (Next page / Done).
+            val raw = Imaging.loadOriented(imageFile)
+            val m = Imaging.downscaleTo(raw, 3000)
+            if (m !== raw) raw.recycle()
+            original = m
+            master = m
+            val found = Imaging.detectCorners(m)
+            corners = found ?: defaultCorners()
+            detected = found != null
+            Trace.log("review loaded ${m.width}x${m.height}, detection=${found != null}")
+        }
+    }
+
+    LaunchedEffect(mode, filter) {
+        if (mode != "preview") return@LaunchedEffect
+        val bmp = original ?: return@LaunchedEffect
+        val c = corners ?: return@LaunchedEffect
+        preview = null
+        withContext(Dispatchers.IO) {
+            val small = Imaging.downscaleTo(master ?: bmp, 1400)
+            preview = Imaging.applyFilter(Imaging.warp(small, c), filter)
+        }
+    }
+
+    fun rotateBy(degCW: Int) {
+        val bmp = original ?: return
+        scope.launch {
+            busy = true
+            withContext(Dispatchers.IO) {
+                val r = Imaging.rotate(bmp, degCW)
+                original = r
+                master = r
+                val found = Imaging.detectCorners(r)
+                corners = found ?: defaultCorners()
+                detected = found != null
+            }
+            preview = null
+            mode = "adjust"
+            busy = false
+        }
+    }
+
+    fun processPage(deliver: (File) -> Unit) {
+        val bmp = master ?: original ?: return
+        val c = corners ?: return
+        Trace.log("processPage start filter=$filter")
+        busy = true
+        scope.launch {
+            val outFile = try {
+                withContext(Dispatchers.IO) {
+                    val done = Imaging.applyFilter(Imaging.warp(bmp, c), filter)
+                    val f = File(context.cacheDir, "page_${System.currentTimeMillis()}.jpg")
+                    Imaging.saveJpeg(done, f)
+                    f
+                }
+            } catch (t: Throwable) { Trace.log("processPage FAILED (${t.javaClass.simpleName}): ${t.message}"); null }
+            busy = false
+            if (outFile != null) { Trace.log("processPage done"); deliver(outFile) }
+            else Toast.makeText(context, "That page could not be processed. Please retake it a little closer.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // NOTE: bitmaps are deliberately NOT recycled here. In-flight IO work
+    // (preview warp, rotate) can still be reading them as this screen
+    // leaves; a recycle then crashes natively. They become garbage and
+    // the GC reclaims them — the 3000px diet keeps that garbage small.
+
+    Column(Modifier.fillMaxSize().background(Color(0xFF141210))) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onRetake, enabled = !busy) { Text("Retake", color = Color.White) }
+            Text("Review", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            if (busy) CircularProgressIndicator(color = Gold, modifier = Modifier.size(20.dp))
+        }
+
+        Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
+            val bmp = original
+            val c = corners
+            if (bmp == null || c == null) {
+                CircularProgressIndicator(color = Gold)
+            } else {
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    val boxW = maxWidth.value; val boxH = maxHeight.value
+                    if (mode == "preview") {
+                        val pv = preview
+                        if (pv == null) {
+                            CircularProgressIndicator(color = Gold, modifier = Modifier.align(Alignment.Center))
+                        } else {
+                            val s2 = minOf(boxW / pv.width, boxH / pv.height)
+                            Image(pv.asImageBitmap(), contentDescription = null,
+                                modifier = Modifier.offset(x = ((boxW - pv.width * s2) / 2).dp, y = ((boxH - pv.height * s2) / 2).dp)
+                                    .size((pv.width * s2).dp, (pv.height * s2).dp),
+                                contentScale = ContentScale.FillBounds)
+                        }
+                    } else {
+                        val scale = minOf(boxW / bmp.width, boxH / bmp.height)
+                        val dispW = bmp.width * scale; val dispH = bmp.height * scale
+                        val offX = (boxW - dispW) / 2; val offY = (boxH - dispH) / 2
+                        Image(bmp.asImageBitmap(), contentDescription = null,
+                            modifier = Modifier.offset(x = offX.dp, y = offY.dp).size(dispW.dp, dispH.dp),
+                            contentScale = ContentScale.FillBounds)
+                        Canvas(Modifier.offset(x = offX.dp, y = offY.dp).size(dispW.dp, dispH.dp)) {
+                            val pts = c.map { Offset(it.x * size.width, it.y * size.height) }
+                            val path = Path().apply {
+                                moveTo(pts[0].x, pts[0].y)
+                                for (i in 1..3) lineTo(pts[i].x, pts[i].y)
+                                close()
+                            }
+                            drawPath(path, color = Gold.copy(alpha = 0.25f))
+                            drawPath(path, color = Gold, style = Stroke(width = 3f))
+                            val di = dragIdx
+                            if (di != null) {
+                                val cp = c[di]
+                                val loupeR = 58.dp.toPx()
+                                val cxL = size.width / 2
+                                val cyL = loupeR + 10.dp.toPx()
+                                val lPath = Path().apply { addOval(Rect(cxL - loupeR, cyL - loupeR, cxL + loupeR, cyL + loupeR)) }
+                                clipPath(lPath) {
+                                    val srcW = (bmp.width * 0.16f).toInt().coerceAtLeast(10)
+                                    val sx = ((cp.x * bmp.width).toInt() - srcW / 2).coerceIn(0, maxOf(0, bmp.width - srcW))
+                                    val sy = ((cp.y * bmp.height).toInt() - srcW / 2).coerceIn(0, maxOf(0, bmp.height - srcW))
+                                    drawImage(bmp.asImageBitmap(),
+                                        srcOffset = IntOffset(sx, sy),
+                                        srcSize = IntSize(srcW, srcW),
+                                        dstOffset = IntOffset((cxL - loupeR).toInt(), (cyL - loupeR).toInt()),
+                                        dstSize = IntSize((loupeR * 2).toInt(), (loupeR * 2).toInt()))
+                                }
+                                drawCircle(Color.White, loupeR, Offset(cxL, cyL), style = Stroke(width = 3f))
+                                drawLine(Gold, Offset(cxL - 13, cyL), Offset(cxL + 13, cyL), strokeWidth = 2.5f)
+                                drawLine(Gold, Offset(cxL, cyL - 13), Offset(cxL, cyL + 13), strokeWidth = 2.5f)
+                            }
+                        }
+                        c.forEachIndexed { idx, p ->
+                            Box(
+                                Modifier
+                                    .offset(x = (offX + p.x * dispW - 21).dp, y = (offY + p.y * dispH - 21).dp)
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                                    .pointerInput(idx) {
+                                        detectDragGestures(
+                                            onDragStart = { dragIdx = idx },
+                                            onDragEnd = { dragIdx = null },
+                                            onDragCancel = { dragIdx = null }
+                                        ) { change, drag ->
+                                            change.consume()
+                                            val cur = corners ?: return@detectDragGestures
+                                            val next = Array(4) { PointF(cur[it].x, cur[it].y) }
+                                            next[idx] = PointF(
+                                                (cur[idx].x + drag.x / (dispW * density)).coerceIn(0f, 1f),
+                                                (cur[idx].y + drag.y / (dispH * density)).coerceIn(0f, 1f)
+                                            )
+                                            corners = next
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(Modifier.size(34.dp).clip(CircleShape).background(Gold), contentAlignment = Alignment.Center) {
+                                    Text("✥", color = GoldInk, fontSize = 15.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Text(
+            if (mode == "preview") "This is your flattened page."
+            else if (detected) "Edges found — drag the corners to adjust."
+            else "No clear edges found — drag the corners onto your document.",
+            color = Color(0xFFCFC8BA), fontSize = 12.5.sp,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp)
+        )
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Rotate:", color = Color(0xFFCFC8BA), fontSize = 12.5.sp)
+            OutlinedButton(onClick = { rotateBy(270) }, enabled = !busy && original != null, shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)) { Text("⟲ Left", fontSize = 12.5.sp) }
+            OutlinedButton(onClick = { rotateBy(90) }, enabled = !busy && original != null, shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)) { Text("Right ⟳", fontSize = 12.5.sp) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = mode == "adjust",
+                onClick = { mode = "adjust" },
+                label = { Text("Adjust corners", fontSize = 12.5.sp) },
+                colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Gold, selectedLabelColor = GoldInk, containerColor = Color(0xFF262019), labelColor = Color(0xFFE8E2D4)),
+                border = FilterChipDefaults.filterChipBorder(enabled = true, selected = mode == "adjust", selectedBorderColor = Gold, borderColor = Color(0xFF4A4234), selectedBorderWidth = 1.dp, borderWidth = 1.dp)
+            )
+            FilterChip(
+                selected = mode == "preview",
+                onClick = { mode = "preview" },
+                label = { Text("Preview", fontSize = 12.5.sp) },
+                colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Gold, selectedLabelColor = GoldInk, containerColor = Color(0xFF262019), labelColor = Color(0xFFE8E2D4)),
+                border = FilterChipDefaults.filterChipBorder(enabled = true, selected = mode == "preview", selectedBorderColor = Gold, borderColor = Color(0xFF4A4234), selectedBorderWidth = 1.dp, borderWidth = 1.dp)
+            )
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val options = listOf(
+                Imaging.ScanFilter.ORIGINAL to "Original",
+                Imaging.ScanFilter.MAGIC to "Magic Color",
+                Imaging.ScanFilter.GRAY to "Gray",
+                Imaging.ScanFilter.BW to "B&W"
+            )
+            options.forEach { (f, label) ->
+                FilterChip(
+                    selected = filter == f,
+                    onClick = { filter = f },
+                    label = { Text(label, fontSize = 12.5.sp) },
+                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Gold, selectedLabelColor = GoldInk, containerColor = Color(0xFF262019), labelColor = Color(0xFFE8E2D4)),
+                    border = FilterChipDefaults.filterChipBorder(enabled = true, selected = filter == f, selectedBorderColor = Gold, borderColor = Color(0xFF4A4234), selectedBorderWidth = 1.dp, borderWidth = 1.dp)
+                )
+            }
+        }
+        // Primary actions live at the BOTTOM now — thumb reach, one hand.
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = { processPage { onNext(it) } },
+                enabled = !busy && original != null,
+                shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 14.dp)
+            ) { Text("Next page", fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
+            Button(
+                onClick = { processPage { onDone(it) } },
+                enabled = !busy && original != null,
+                shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk),
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 14.dp)
+            ) { Text("Done", fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
+        }
+    }
+}
+
+
+════════════════════════════════════════════════════════
+FILE: app/src/main/java/com/asadwebs/pdfspeed/data/Docs.kt
+════════════════════════════════════════════════════════
+
+package com.asadwebs.pdfspeed.data
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.pdf.PdfDocument
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+
+/** A scanned document: an ordered list of page image files on disk. */
+data class Doc(
+    val id: String,
+    val name: String,
+    val createdAt: Long,
+    val pages: List<String>,
+    val starred: Boolean = false,
+    val edited: Boolean = false
+)
+
+class DocStore(private val context: Context) {
+    private val indexFile = File(context.filesDir, "docs.json")
+    private val docsDir = File(context.filesDir, "docs").apply { mkdirs() }
+
+    fun load(): List<Doc> {
+        if (!indexFile.exists()) return emptyList()
+        return try {
+            val arr = JSONArray(indexFile.readText())
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val pages = o.getJSONArray("pages")
+                Doc(
+                    id = o.getString("id"),
+                    name = o.getString("name"),
+                    createdAt = o.getLong("createdAt"),
+                    pages = (0 until pages.length()).map { pages.getString(it) },
+                    starred = o.optBoolean("starred"),
+                    edited = o.optBoolean("edited")
+                )
+            }.sortedByDescending { it.createdAt }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    private fun save(docs: List<Doc>) {
+        val arr = JSONArray()
+        docs.forEach { d ->
+            arr.put(JSONObject().apply {
+                put("id", d.id); put("name", d.name); put("createdAt", d.createdAt)
+                put("pages", JSONArray(d.pages)); put("starred", d.starred); put("edited", d.edited)
+            })
+        }
+        indexFile.writeText(arr.toString())
+    }
+
+    fun addPageToNewDoc(imageFile: File, name: String): Doc {
+        val id = System.currentTimeMillis().toString()
+        val dir = File(docsDir, id).apply { mkdirs() }
+        val dest = File(dir, "page1.jpg")
+        imageFile.copyTo(dest, overwrite = true)
+        val doc = Doc(id, name, System.currentTimeMillis(), listOf(dest.absolutePath))
+        save(load().filter { it.id != id } + doc)
+        return doc
+    }
+
+    fun addPage(docId: String, imageFile: File): Doc? {
+        val docs = load().toMutableList()
+        val idx = docs.indexOfFirst { it.id == docId }
+        if (idx < 0) return null
+        val d = docs[idx]
+        val dest = File(docsDir, "${d.id}/page_${System.currentTimeMillis()}.jpg")
+        imageFile.copyTo(dest, overwrite = true)
+        val updated = d.copy(pages = d.pages + dest.absolutePath, edited = true)
+        docs[idx] = updated; save(docs)
+        return updated
+    }
+
+    fun toggleStar(docId: String) {
+        val docs = load().map { if (it.id == docId) it.copy(starred = !it.starred) else it }
+        save(docs)
+    }
+
+    fun rename(docId: String, newName: String) {
+        val docs = load().map { if (it.id == docId) it.copy(name = newName) else it }
+        save(docs)
+    }
+
+    fun delete(docId: String) {
+        File(docsDir, docId).deleteRecursively()
+        save(load().filter { it.id != docId })
+    }
+
+
+    fun addPagesToNewDoc(imageFiles: List<File>, name: String): Doc {
+        val id = System.currentTimeMillis().toString()
+        val dir = File(docsDir, id).apply { mkdirs() }
+        val paths = imageFiles.mapIndexed { i, f ->
+            val dest = File(dir, "page${i + 1}.jpg")
+            f.copyTo(dest, overwrite = true)
+            dest.absolutePath
+        }
+        val doc = Doc(id, name, System.currentTimeMillis(), paths)
+        save(load().filter { it.id != id } + doc)
+        return doc
+    }
+
+    fun movePage(docId: String, index: Int, dir: Int) {
+        val docs = load().toMutableList()
+        val idx = docs.indexOfFirst { it.id == docId }
+        if (idx < 0) return
+        val doc = docs[idx]
+        val target = index + dir
+        if (index !in doc.pages.indices || target !in doc.pages.indices) return
+        val pages = doc.pages.toMutableList()
+        val tmp = pages[index]; pages[index] = pages[target]; pages[target] = tmp
+        docs[idx] = doc.copy(pages = pages, edited = true)
+        save(docs)
+    }
+
+    fun deletePage(docId: String, index: Int) {
+        val docs = load().toMutableList()
+        val idx = docs.indexOfFirst { it.id == docId }
+        if (idx < 0) return
+        val doc = docs[idx]
+        if (index !in doc.pages.indices) return
+        File(doc.pages[index]).delete()
+        val pages = doc.pages.toMutableList().also { it.removeAt(index) }
+        docs[idx] = doc.copy(pages = pages, edited = true)
+        save(docs)
+    }
+
+    /** Renders every page of a picked PDF to JPEGs and files it as a document. */
+    fun importPdf(uri: Uri): Doc? {
+        val fd = try { context.contentResolver.openFileDescriptor(uri, "r") } catch (e: Exception) { null } ?: return null
+        return try {
+            val renderer = PdfRenderer(fd)
+            val files = ArrayList<File>()
+            for (i in 0 until renderer.pageCount) {
+                val page = renderer.openPage(i)
+                val scale = 1400f / page.width
+                val bmp = Bitmap.createBitmap(1400, (page.height * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(android.graphics.Color.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+                val f = File(context.cacheDir, "import_${System.currentTimeMillis()}_$i.jpg")
+                FileOutputStream(f).use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }
+                bmp.recycle()
+                files.add(f)
+            }
+            renderer.close(); fd.close()
+            if (files.isEmpty()) null
+            else addPagesToNewDoc(files, "Imported PDF " + java.text.SimpleDateFormat("d MMM, HH:mm", java.util.Locale.getDefault()).format(java.util.Date()))
+        } catch (e: Exception) { try { fd.close() } catch (e2: Exception) { }; null }
+    }
+
+    /** Renders the document to an A4 PDF in the cache dir and returns the file. */
+    fun exportPdf(doc: Doc): File {
+        val out = File(context.cacheDir, "${doc.name.replace(Regex("[^A-Za-z0-9_-]"), "_")}.pdf")
+        val pdf = PdfDocument()
+        val paint = Paint()
+        doc.pages.forEachIndexed { i, path ->
+            val bmp = BitmapFactory.decodeFile(path) ?: return@forEachIndexed
+            val pageInfo = PdfDocument.PageInfo.Builder(595, 842, i + 1).create()
+            val page = pdf.startPage(pageInfo)
+            val scale = minOf(595f / bmp.width, 842f / bmp.height)
+            val w = bmp.width * scale; val h = bmp.height * scale
+            val dest = RectF((595 - w) / 2, (842 - h) / 2, (595 + w) / 2, (842 + h) / 2)
+            page.canvas.drawBitmap(bmp, null, dest, paint)
+            pdf.finishPage(page)
+            bmp.recycle()
+        }
+        FileOutputStream(out).use { pdf.writeTo(it) }
+        pdf.close()
+        return out
+    }
+}
+
+

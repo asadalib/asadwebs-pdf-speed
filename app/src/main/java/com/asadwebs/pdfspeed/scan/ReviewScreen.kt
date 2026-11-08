@@ -44,7 +44,7 @@ import java.io.File
  *  buttons re-run detection on the rotated photo. Done / Next page process
  *  the page at up to 3000px and hand the finished JPEG back. */
 @Composable
-fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit, onRetake: () -> Unit, initialFilter: Imaging.ScanFilter = Imaging.ScanFilter.MAGIC) {
+fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit, onRetake: () -> Unit, initialFilter: Imaging.ScanFilter = Imaging.ScanFilter.MAGIC, preCropped: Boolean = false) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var original by remember { mutableStateOf<Bitmap?>(null) }
@@ -53,7 +53,7 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
     var detected by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf(initialFilter) }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
-    var mode by remember { mutableStateOf("adjust") }
+    var mode by remember { mutableStateOf(if (preCropped) "preview" else "adjust") }
     var dragIdx by remember { mutableStateOf<Int?>(null) }
     var busy by remember { mutableStateOf(false) }
 
@@ -73,10 +73,16 @@ fun ReviewScreen(imageFile: File, onDone: (File) -> Unit, onNext: (File) -> Unit
             if (m !== raw) raw.recycle()
             original = m
             master = m
-            val found = Imaging.detectCorners(m)
-            corners = found ?: defaultCorners()
-            detected = found != null
-            Trace.log("review loaded ${m.width}x${m.height}, detection=${found != null}")
+            if (preCropped) {
+                corners = arrayOf(PointF(0f, 0f), PointF(1f, 0f), PointF(1f, 1f), PointF(0f, 1f))
+                detected = true
+                Trace.log("review loaded ${m.width}x${m.height}, preCropped (library engine)")
+            } else {
+                val found = Imaging.detectCorners(m)
+                corners = found ?: defaultCorners()
+                detected = found != null
+                Trace.log("review loaded ${m.width}x${m.height}, detection=${found != null}")
+            }
         }
     }
 
