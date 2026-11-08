@@ -465,6 +465,9 @@ fun MeScreen(docCount: Int) {
                     Spacer(Modifier.height(10.dp))
                     Text("Documents in library: $docCount", color = Muted, fontSize = 13.sp)
                     Text("Version 1.0", color = Muted, fontSize = 13.sp)
+                }
+            }
+        }
         item {
             Spacer(Modifier.height(18.dp))
             Kicker("Diagnostics")
@@ -490,9 +493,6 @@ fun MeScreen(docCount: Int) {
                         OutlinedButton(onClick = { traceText = Trace.tail(60) }, shape = RoundedCornerShape(999.dp)) { Text("Refresh") }
                         TextButton(onClick = { Trace.clear(); traceText = Trace.tail(60) }) { Text("Clear") }
                     }
-                }
-            }
-        }
                 }
             }
         }

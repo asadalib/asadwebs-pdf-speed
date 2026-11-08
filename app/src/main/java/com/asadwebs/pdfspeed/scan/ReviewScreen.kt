@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.Gold
-import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.GoldInk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

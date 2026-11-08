@@ -46,7 +46,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.Gold
-import com.asadwebs.pdfspeed.data.Trace
 import com.asadwebs.pdfspeed.ui.GoldInk
 import com.asadwebs.pdfspeed.ui.Ink
 import java.io.File
