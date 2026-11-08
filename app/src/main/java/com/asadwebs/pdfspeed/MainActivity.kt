@@ -112,133 +112,46 @@ fun AppRoot() {
     val store = remember { DocStore(context) }
     var docs by remember { mutableStateOf(store.load()) }
     fun refresh() { docs = store.load() }
-    var pendingCapture by remember { mutableStateOf<java.io.File?>(null) }
     var pendingTarget by remember { mutableStateOf("new") }
-    var pendingMode by remember { mutableStateOf("doc") }
-    var pendingPreCropped by remember { mutableStateOf(false) }
-    var pendingIdFront by remember { mutableStateOf<java.io.File?>(null) }
     val nav = rememberNavController()
     val route = nav.currentBackStackEntryAsState().value?.destination?.route
+    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val paths = result.data?.getStringArrayExtra(com.asadwebs.pdfspeed.scan.ScannerActivity.EXTRA_PAGES)?.toList().orEmpty()
+            if (paths.isNotEmpty()) {
+                var docId = pendingTarget
+                paths.forEachIndexed { i, path ->
+                    val f = java.io.File(path)
+                    docId = if (docId == "new" && i == 0) {
+                        store.addPageToNewDoc(f, "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())).id
+                    } else {
+                        store.addPage(docId, f); docId
+                    }
+                }
+                pendingTarget = docId
+                refresh()
+                nav.navigate("doc/$docId") { popUpTo("home") { inclusive = false } }
+            }
+        }
+    }
+    fun launchScanner(target: String) {
+        pendingTarget = target
+        scanLauncher.launch(Intent(context, com.asadwebs.pdfspeed.scan.ScannerActivity::class.java))
+    }
     val showBar = route in listOf("home", "library", "tools", "me")
     LaunchedEffect(route) { Trace.log("route -> $route") }
 
     Box(Modifier.fillMaxSize()) {
         NavHost(navController = nav, startDestination = "home", modifier = Modifier.fillMaxSize()) {
-            composable("home") { HomeScreen(docs.firstOrNull(), nav, onScanNew = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") }) }
+            composable("home") { HomeScreen(docs.firstOrNull(), nav, onScanNew = { launchScanner("new") }) }
             composable("library") { LibraryScreen(docs, store, { refresh() }, nav) }
-            composable("tools") { ToolsScreen(nav, onScanNew = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") }) }
+            composable("tools") { ToolsScreen(nav, onScanNew = { launchScanner("new") }) }
             composable("me") { MeScreen(docs.size) }
-            composable("scanner") {
-                ScannerScreen(
-                    onCaptured = { file, mode ->
-                        pendingCapture = file
-                        pendingMode = mode
-                        pendingPreCropped = false
-                        nav.navigate("crop")
-                    },
-                    onClose = { nav.popBackStack() },
-                    backSide = pendingMode == "id" && pendingIdFront != null
-                )
-            }
-            composable("crop") {
-                val file = pendingCapture
-                if (file == null) {
-                    LaunchedEffect(Unit) { nav.popBackStack() }
-                } else {
-                    CropScreen(
-                        imageFile = file,
-                        onCropped = { cropped ->
-                            pendingCapture = cropped
-                            pendingPreCropped = true
-                            nav.navigate("review") { popUpTo("scanner") { inclusive = false } }
-                        },
-                        onFallback = { original ->
-                            pendingCapture = original
-                            pendingPreCropped = false
-                            nav.navigate("review") { popUpTo("scanner") { inclusive = false } }
-                        },
-                        onCancel = { nav.popBackStack() }
-                    )
-                }
-            }
-            composable("review") {
-                val file = pendingCapture
-                if (file == null) {
-                    LaunchedEffect(Unit) { nav.popBackStack() }
-                } else {
-                    // One delivery path for every mode: Book splits the spread
-                    // into two pages; ID Card waits for the back side, then
-                    // composes front+back onto a single page.
-                    fun deliver(processed: java.io.File, continueScan: Boolean) {
-                        Trace.log("deliver mode=$pendingMode continue=$continueScan target=$pendingTarget")
-                        fun scanName() = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())
-                        fun addToTarget(pageFile: java.io.File): String {
-                            return if (pendingTarget == "new") {
-                                val doc = store.addPageToNewDoc(pageFile, scanName())
-                                pendingTarget = doc.id
-                                doc.id
-                            } else {
-                                store.addPage(pendingTarget, pageFile)
-                                pendingTarget
-                            }
-                        }
-                        fun finish(docId: String) {
-                            Trace.log("finish continue=$continueScan doc=$docId")
-                            refresh()
-                            pendingCapture = null
-                            if (continueScan) nav.popBackStack()
-                            else nav.navigate("doc/$docId") { popUpTo("home") { inclusive = false } }
-                        }
-                        when (pendingMode) {
-                            "book" -> Thread {
-                                val bmp = BmpFactory.decodeFile(processed.absolutePath)
-                                val (left, right) = Imaging.splitSpread(bmp)
-                                val f1 = java.io.File(context.cacheDir, "book_l_${System.currentTimeMillis()}.jpg")
-                                val f2 = java.io.File(context.cacheDir, "book_r_${System.currentTimeMillis()}.jpg")
-                                Imaging.saveJpeg(left, f1); Imaging.saveJpeg(right, f2)
-                                Handler(Looper.getMainLooper()).post {
-                                    val id = addToTarget(f1)
-                                    store.addPage(id, f2)
-                                    finish(id)
-                                }
-                            }.start()
-                            "id" -> {
-                                val front = pendingIdFront
-                                if (front == null) {
-                                    pendingIdFront = processed
-                                    pendingCapture = null
-                                    Toast.makeText(context, "Front saved — now scan the BACK side", Toast.LENGTH_LONG).show()
-                                    nav.popBackStack()
-                                } else {
-                                    pendingIdFront = null
-                                    Thread {
-                                        val fb = BmpFactory.decodeFile(front.absolutePath)
-                                        val bb = BmpFactory.decodeFile(processed.absolutePath)
-                                        val page = Imaging.composeIdPage(fb, bb)
-                                        val f = java.io.File(context.cacheDir, "idcard_${System.currentTimeMillis()}.jpg")
-                                        Imaging.saveJpeg(page, f)
-                                        Handler(Looper.getMainLooper()).post { finish(addToTarget(f)) }
-                                    }.start()
-                                }
-                            }
-                            else -> finish(addToTarget(processed))
-                        }
-                    }
-                    ReviewScreen(
-                        imageFile = file,
-                        initialFilter = modeFilter(pendingMode),
-                        preCropped = pendingPreCropped,
-                        onDone = { processed -> deliver(processed, false) },
-                        onNext = { processed -> deliver(processed, true) },
-                        onRetake = { nav.popBackStack() }
-                    )
-                }
-            }
             composable("doc/{docId}") { entry ->
                 val docId = entry.arguments?.getString("docId")
                 val doc = docs.firstOrNull { it.id == docId }
                 if (doc != null) {
-                    DocScreen(doc, store, { refresh() }, nav, onAddPage = { pendingTarget = doc.id; nav.navigate("scanner") })
+                    DocScreen(doc, store, { refresh() }, nav, onAddPage = { launchScanner(doc.id) })
                 } else {
                     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
                         Text("This document could not be opened.", style = MaterialTheme.typography.titleLarge)
@@ -252,7 +165,7 @@ fun AppRoot() {
                 }
             }
         }
-        if (showBar) BottomBar(route, nav, Modifier.align(Alignment.BottomCenter), onScan = { pendingTarget = "new"; pendingIdFront = null; nav.navigate("scanner") })
+        if (showBar) BottomBar(route, nav, Modifier.align(Alignment.BottomCenter), onScan = { launchScanner("new") })
     }
 }
 

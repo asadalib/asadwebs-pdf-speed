@@ -78,7 +78,6 @@ private class CapHolder {
     @Volatile var busy: Boolean = false
     @Volatile var frozen: Boolean = false
     @Volatile var active: Boolean = true
-    @Volatile var resumed: Boolean = false
 }
 
 private class Stab {
@@ -89,12 +88,16 @@ private class Stab {
 }
 
 /** CameraX scanner with live edge detection and steady-frame auto-capture.
- *  Binding is lifecycle-safe: it (re)binds on resume and unbinds on dispose,
- *  so coming back from Review never shows a dead black preview. Capture
+ *  Hosted by ScannerActivity, which keeps this composable alive underneath
+ *  the crop/review overlays — so the camera binds ONCE per scan session
+ *  (to the activity lifecycle) and is never rebound when the next page
+ *  starts. That rebind, on the old navigation return path, was what kept
+ *  killing the camera on page 2. [enabled] is false while an overlay
+ *  covers the camera: detection idles and capture is gated off. Capture
  *  callbacks always run on the main executor (an earlier crash came from
  *  navigating off a background thread). */
 @Composable
-fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backSide: Boolean = false) {
+fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backSide: Boolean = false, enabled: Boolean = true) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasPermission by remember {
@@ -115,8 +118,18 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { analysisExecutor.shutdown() } }
 
+    // The crop/review overlay just lifted: clear the per-capture state so
+    // detection and auto-capture run again for the next page.
+    LaunchedEffect(enabled) {
+        if (enabled) {
+            capHolder.busy = false
+            capHolder.frozen = false
+            stab.last = null; stab.since = 0
+        }
+    }
+
     fun capture() {
-        if (!capHolder.active) { Trace.log("capture() ignored — scanner inactive"); return }
+        if (!capHolder.active || !enabled) { Trace.log("capture() ignored — scanner inactive or covered"); return }
         Trace.log("capture() called busy=${capHolder.busy} auto will follow")
         val cap = capHolder.capture ?: run {
             Toast.makeText(context, "Camera is starting… one moment.", Toast.LENGTH_SHORT).show()
@@ -162,12 +175,10 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
         }.start()
     }
 
-    DisposableEffect(previewView, hasPermission, lifecycleOwner) {
+    DisposableEffect(previewView, hasPermission) {
         val pv = previewView
         if (pv == null || !hasPermission) return@DisposableEffect onDispose { }
         var provider: ProcessCameraProvider? = null
-        var bound = false
-        var attempts = 0
         fun bind() {
             val prov = provider ?: return
             try {
@@ -182,7 +193,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                 analysis.setAnalyzer(analysisExecutor) { proxy ->
                     try {
                         val now = System.currentTimeMillis()
-                        if (now - stab.lastRun >= 350 && !capHolder.frozen) {
+                        if (now - stab.lastRun >= 350 && !capHolder.frozen && enabled) {
                             stab.lastRun = now
                             val gray = Imaging.yuvToGray(proxy)
                             val found = if (gray != null) Imaging.detectCorners(Imaging.downscaleTo(gray, 360)) else null
@@ -200,7 +211,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                                 }
                                 if (stable) {
                                     if (stab.since == 0L) stab.since = now
-                                    if (autoCap && capHolder.active && capHolder.resumed && now - stab.since > 900 && !capHolder.busy) {
+                                    if (autoCap && capHolder.active && now - stab.since > 900 && !capHolder.busy) {
                                         Trace.log("auto-capture firing")
                                         Handler(Looper.getMainLooper()).post { capture() }
                                     }
@@ -218,17 +229,10 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                 camera = cam
                 capHolder.capture = capture
                 if (torch) cam.cameraControl.enableTorch(true)
-                bound = true
-                Trace.log("camera bound OK")
+                Trace.log("camera bound OK (single bind for the whole session)")
             } catch (e: Exception) {
                 Trace.log("bind FAILED (${e.javaClass.simpleName}): ${e.message}")
-                bound = false
-                attempts++
-                if (attempts <= 2) {
-                    pv.postDelayed({ if (!bound) bind() }, 600)
-                } else {
-                    Toast.makeText(context, "Camera could not start. Please close and reopen the scanner.", Toast.LENGTH_LONG).show()
-                }
+                Toast.makeText(context, "Camera could not start. Please close and reopen the scanner.", Toast.LENGTH_LONG).show()
             }
         }
         val future = ProcessCameraProvider.getInstance(context)
@@ -236,29 +240,11 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
             provider = try { future.get() } catch (e: Exception) { null }
             bind()
         }, ContextCompat.getMainExecutor(context))
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                capHolder.resumed = true
-                capHolder.busy = false
-                capHolder.frozen = false
-                stab.last = null; stab.since = 0
-                Trace.log("scanner ON_RESUME (bound=$bound)")
-                if (!bound) bind()
-            }
-            if (event == Lifecycle.Event.ON_PAUSE) {
-                capHolder.resumed = false
-                Trace.log("scanner ON_PAUSE")
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
-            Trace.log("scanner DISPOSED")
+            Trace.log("scanner DISPOSED (scan session ending)")
             capHolder.active = false
-            capHolder.resumed = false
             try { capHolder.analysis?.clearAnalyzer() } catch (e: Exception) { }
-            lifecycleOwner.lifecycle.removeObserver(observer)
             try { provider?.unbindAll() } catch (e: Exception) { }
-            bound = false
         }
     }
 
