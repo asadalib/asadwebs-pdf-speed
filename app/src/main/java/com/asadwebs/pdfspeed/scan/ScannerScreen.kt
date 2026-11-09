@@ -75,16 +75,16 @@ fun modeFilter(modeId: String): Imaging.ScanFilter = when (modeId) {
 private class CapHolder {
     var capture: ImageCapture? = null
     var analysis: ImageAnalysis? = null
-    @Volatile var busy: Boolean = false
-    @Volatile var frozen: Boolean = false
     @Volatile var active: Boolean = true
+    var seq: Int = 0
 }
 
 private class Stab {
-    var last: Array<PointF>? = null
     var since: Long = 0
     var lastRun: Long = 0
     var hadFound: Boolean = false
+    var smooth: Array<PointF>? = null
+    var miss: Int = 0
 }
 
 /** CameraX scanner with live edge detection and steady-frame auto-capture.
@@ -113,6 +113,8 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
     var grid by remember { mutableStateOf(false) }
     var autoCap by remember { mutableStateOf(true) }
     var liveCorners by remember { mutableStateOf<Array<PointF>?>(null) }
+    var busyState by remember { mutableStateOf(false) }
+    var frozenState by remember { mutableStateOf(false) }
     val capHolder = remember { CapHolder() }
     val stab = remember { Stab() }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -122,39 +124,95 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
     // detection and auto-capture run again for the next page.
     LaunchedEffect(enabled) {
         if (enabled) {
-            capHolder.busy = false
-            capHolder.frozen = false
-            stab.last = null; stab.since = 0
+            busyState = false
+            frozenState = false
+            stab.smooth = null; stab.since = 0; stab.miss = 0
         }
     }
 
     fun capture() {
         if (!capHolder.active || !enabled) { Trace.log("capture() ignored — scanner inactive or covered"); return }
-        Trace.log("capture() called busy=${capHolder.busy} auto will follow")
         val cap = capHolder.capture ?: run {
             Toast.makeText(context, "Camera is starting… one moment.", Toast.LENGTH_SHORT).show()
             return
         }
-        if (capHolder.busy) return
-        capHolder.busy = true
+        if (busyState) { Trace.log("capture() ignored — already capturing"); return }
+        busyState = true
+        val mySeq = ++capHolder.seq
+        Trace.log("capture() called seq=$mySeq")
         val out = File(context.cacheDir, "capture_${System.currentTimeMillis()}.jpg")
         val options = ImageCapture.OutputFileOptions.Builder(out).build()
+        // Watchdog: if CameraX never calls back, revive the button instead
+        // of leaving it dead for the rest of the session.
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (busyState && capHolder.seq == mySeq) {
+                Trace.log("capture WATCHDOG seq=$mySeq — no callback in 6s, reviving button")
+                busyState = false
+                Toast.makeText(context, "Capture timed out — please tap again.", Toast.LENGTH_SHORT).show()
+            }
+        }, 6000)
         try {
-        cap.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
-            override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                Trace.log("capture saved -> review (mode=${mode.id})")
-                capHolder.frozen = true
-                onCaptured(out, mode.id)
-            }
-            override fun onError(exception: ImageCaptureException) {
-                Trace.log("capture ERROR ${exception.imageCaptureError}: ${exception.message}")
-                capHolder.busy = false
-                Toast.makeText(context, "Capture failed: ${exception.message}", Toast.LENGTH_SHORT).show()
-            }
-        })
+            cap.takePicture(options, ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(result: ImageCapture.OutputFileResults) {
+                    if (capHolder.seq != mySeq) { Trace.log("capture saved LATE seq=$mySeq — ignored"); return }
+                    Trace.log("capture saved seq=$mySeq -> crop (mode=${mode.id})")
+                    busyState = false
+                    frozenState = true
+                    onCaptured(out, mode.id)
+                }
+                override fun onError(exception: ImageCaptureException) {
+                    if (capHolder.seq != mySeq) return
+                    Trace.log("capture ERROR ${exception.imageCaptureError}: ${exception.message}")
+                    busyState = false
+                    Toast.makeText(context, "Capture failed: ${exception.message}", Toast.LENGTH_SHORT).show()
+                }
+            })
         } catch (e: Exception) {
-            capHolder.busy = false
+            Trace.log("takePicture threw (${e.javaClass.simpleName}): ${e.message}")
+            busyState = false
             Toast.makeText(context, "Camera is busy — one moment.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Detection results land here (main thread): the displayed quad is an
+     *  exponentially smoothed one, and auto-capture arms only while fresh
+     *  detections keep AGREEING with it — raw per-frame quads jitter and
+     *  flap between candidates, which is why the old per-frame stability
+     *  test could never fill its 900ms window. */
+    fun onDetection(found: Array<PointF>?) {
+        val now = System.currentTimeMillis()
+        if (found == null) {
+            stab.miss++
+            if (stab.miss >= 2) {
+                if (stab.hadFound) Trace.log("live detection: lost")
+                stab.hadFound = false
+                stab.smooth = null
+                stab.since = 0
+                liveCorners = null
+            }
+            return
+        }
+        stab.miss = 0
+        val prev = stab.smooth
+        val agreed = prev != null && (0 until 4).all { i ->
+            kotlin.math.abs(found[i].x - prev[i].x) + kotlin.math.abs(found[i].y - prev[i].y) < 0.07f
+        }
+        val sm: Array<PointF> = if (prev == null || !agreed) {
+            Array(4) { PointF(found[it].x, found[it].y) }
+        } else {
+            Array(4) { PointF(prev[it].x + 0.35f * (found[it].x - prev[it].x), prev[it].y + 0.35f * (found[it].y - prev[it].y)) }
+        }
+        stab.smooth = sm
+        liveCorners = sm
+        if (!stab.hadFound) { stab.hadFound = true; Trace.log("live detection: FOUND") }
+        if (agreed) {
+            if (stab.since == 0L) stab.since = now
+            if (autoCap && capHolder.active && enabled && !busyState && now - stab.since > 900) {
+                Trace.log("auto-capture firing (stable smoothed quad)")
+                capture()
+            }
+        } else {
+            stab.since = 0
         }
     }
 
@@ -191,38 +249,21 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
                     .build()
                 capHolder.analysis = analysis
                 analysis.setAnalyzer(analysisExecutor) { proxy ->
+                    // Copy the frame out and release the proxy IMMEDIATELY.
+                    // Holding it open during detection starves the camera
+                    // pipeline — and a starved pipeline never answers
+                    // takePicture (the dead-capture bug: preview alive,
+                    // detection alive, capture mute).
+                    val bmp = try { Imaging.yuvToGray(proxy) } catch (e: Exception) { null } finally { proxy.close() }
+                    if (bmp == null) return@setAnalyzer
+                    val now = System.currentTimeMillis()
+                    if (!enabled || frozenState || now - stab.lastRun < 400) { bmp.recycle(); return@setAnalyzer }
+                    stab.lastRun = now
                     try {
-                        val now = System.currentTimeMillis()
-                        if (now - stab.lastRun >= 350 && !capHolder.frozen && enabled) {
-                            stab.lastRun = now
-                            val gray = Imaging.yuvToGray(proxy)
-                            val found = if (gray != null) Imaging.detectCorners(Imaging.downscaleTo(gray, 360)) else null
-                            liveCorners = found
-                            if ((found != null) != stab.hadFound) {
-                                stab.hadFound = found != null
-                                Trace.log(if (found != null) "live detection: FOUND" else "live detection: lost")
-                            }
-                            if (found == null) {
-                                stab.last = null; stab.since = 0
-                            } else {
-                                val prev = stab.last
-                                val stable = prev != null && (0 until 4).all { i ->
-                                    kotlin.math.abs(found[i].x - prev[i].x) + kotlin.math.abs(found[i].y - prev[i].y) < 0.02f
-                                }
-                                if (stable) {
-                                    if (stab.since == 0L) stab.since = now
-                                    if (autoCap && capHolder.active && now - stab.since > 900 && !capHolder.busy) {
-                                        Trace.log("auto-capture firing")
-                                        Handler(Looper.getMainLooper()).post { capture() }
-                                    }
-                                } else {
-                                    stab.since = 0
-                                }
-                                stab.last = found
-                            }
-                        }
+                        val found = Imaging.detectCorners(Imaging.downscaleTo(bmp, 480))
+                        Handler(Looper.getMainLooper()).post { onDetection(found) }
                     } catch (e: Exception) { /* next frame */ }
-                    finally { proxy.close() }
+                    bmp.recycle()
                 }
                 prov.unbindAll()
                 val cam = prov.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture, analysis)
@@ -335,7 +376,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
             .background(Color(0x66000000), RoundedCornerShape(999.dp)).padding(horizontal = 14.dp, vertical = 6.dp)) {
             Text(
                 when {
-                    capHolder.busy -> "Capturing…"
+                    busyState -> "Capturing…"
                     liveCorners != null && autoCap -> "Edges found — hold steady, capturing automatically"
                     liveCorners != null -> "Edges found"
                     mode.id == "id" && backSide -> "Front saved — now scan the BACK side"

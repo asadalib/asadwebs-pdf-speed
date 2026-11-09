@@ -84,15 +84,30 @@ object Imaging {
         }
         lum = blr
 
-        var best: Pair<Array<PointF>, Float>? = null
-        fun consider(cand: Pair<Array<PointF>, Float>?) {
-            if (cand != null && (best == null || cand.second > best!!.second)) best = cand
+        val cands = listOfNotNull(
+            blobQuad(lum, dw, dh, false),
+            blobQuad(lum, dw, dh, true),
+            edgeQuad(lum, dw, dh)
+        )
+        if (cands.isEmpty()) return null
+        fun areaFrac(q: Array<PointF>): Float {
+            var a = 0f
+            for (i in 0 until 4) {
+                val p = q[i]; val r = q[(i + 1) % 4]
+                a += p.x * r.y - r.x * p.y
+            }
+            return kotlin.math.abs(a) / 2f / (dw * dh)
         }
-        consider(blobQuad(lum, dw, dh, false))
-        consider(blobQuad(lum, dw, dh, true))
-        consider(edgeQuad(lum, dw, dh))
-
-        val rawQuad = best?.first ?: return null
+        val byScore = cands.maxByOrNull { it.second }!!
+        val byArea = cands.maxByOrNull { areaFrac(it.first) }!!
+        // A printed table inside the page can out-score the page itself
+        // (crisp lines, perfect fill) — but the document is the LARGEST
+        // outline. Prefer the largest candidate unless the best-scored
+        // one is comparable in size or clearly stronger.
+        val rawQuad = if (byArea !== byScore &&
+            areaFrac(byScore.first) < 0.55f * areaFrac(byArea.first) &&
+            byArea.second >= 0.55f * byScore.second
+        ) byArea.first else byScore.first
         val quad = refineQuadPx(lum, dw, dh, rawQuad)
         var cx = 0f; var cy = 0f
         for (p in quad) { cx += p.x; cy += p.y }
