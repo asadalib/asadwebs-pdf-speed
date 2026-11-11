@@ -15,6 +15,8 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -75,7 +77,6 @@ fun modeFilter(modeId: String): Imaging.ScanFilter = when (modeId) {
 private class CapHolder {
     var capture: ImageCapture? = null
     var analysis: ImageAnalysis? = null
-    @Volatile var active: Boolean = true
     var seq: Int = 0
 }
 
@@ -116,6 +117,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
     var busyState by remember { mutableStateOf(false) }
     var frozenState by remember { mutableStateOf(false) }
     val capHolder = remember { CapHolder() }
+    var rebind by remember { mutableStateOf(0) }
     val stab = remember { Stab() }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { analysisExecutor.shutdown() } }
@@ -131,9 +133,13 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
     }
 
     fun capture() {
-        if (!capHolder.active || !enabled) { Trace.log("capture() ignored — scanner inactive or covered"); return }
+        if (!enabled) { Trace.log("capture() ignored — scanner covered by an overlay"); return }
         val cap = capHolder.capture ?: run {
-            Toast.makeText(context, "Camera is starting… one moment.", Toast.LENGTH_SHORT).show()
+            // No live ImageCapture: never fail silently — rebind the
+            // camera and tell the user what is happening.
+            Trace.log("capture() with NO bound camera — rebinding")
+            rebind++
+            Toast.makeText(context, "Camera is restarting… tap again in a moment.", Toast.LENGTH_SHORT).show()
             return
         }
         if (busyState) { Trace.log("capture() ignored — already capturing"); return }
@@ -207,7 +213,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
         if (!stab.hadFound) { stab.hadFound = true; Trace.log("live detection: FOUND") }
         if (agreed) {
             if (stab.since == 0L) stab.since = now
-            if (autoCap && capHolder.active && enabled && !busyState && now - stab.since > 900) {
+            if (autoCap && enabled && !busyState && capHolder.capture != null && now - stab.since > 900) {
                 Trace.log("auto-capture firing (stable smoothed quad)")
                 capture()
             }
@@ -233,7 +239,7 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
         }.start()
     }
 
-    DisposableEffect(previewView, hasPermission) {
+    DisposableEffect(previewView, hasPermission, rebind) {
         val pv = previewView
         if (pv == null || !hasPermission) return@DisposableEffect onDispose { }
         var provider: ProcessCameraProvider? = null
@@ -242,23 +248,29 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
             try {
                 val preview = Preview.Builder().build().also { it.surfaceProvider = pv.surfaceProvider }
                 val capture = ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                     .build()
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setResolutionStrategy(ResolutionStrategy(android.util.Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+                            .build()
+                    )
                     .build()
                 capHolder.analysis = analysis
                 analysis.setAnalyzer(analysisExecutor) { proxy ->
-                    // Copy the frame out and release the proxy IMMEDIATELY.
-                    // Holding it open during detection starves the camera
-                    // pipeline — and a starved pipeline never answers
-                    // takePicture (the dead-capture bug: preview alive,
-                    // detection alive, capture mute).
+                    // Throttle FIRST: frames we are not going to use are
+                    // dropped untouched. Converting every frame (a full
+                    // per-pixel copy) before this check kept a CPU core
+                    // saturated and starved the still-capture pipeline.
+                    val now = System.currentTimeMillis()
+                    if (!enabled || frozenState || now - stab.lastRun < 400) { proxy.close(); return@setAnalyzer }
+                    stab.lastRun = now
+                    // Copy the frame out and release the proxy IMMEDIATELY —
+                    // holding it open during detection starves the camera.
                     val bmp = try { Imaging.yuvToGray(proxy) } catch (e: Exception) { null } finally { proxy.close() }
                     if (bmp == null) return@setAnalyzer
-                    val now = System.currentTimeMillis()
-                    if (!enabled || frozenState || now - stab.lastRun < 400) { bmp.recycle(); return@setAnalyzer }
-                    stab.lastRun = now
                     try {
                         val found = Imaging.detectCorners(Imaging.downscaleTo(bmp, 480))
                         Handler(Looper.getMainLooper()).post { onDetection(found) }
@@ -283,7 +295,6 @@ fun ScannerScreen(onCaptured: (File, String) -> Unit, onClose: () -> Unit, backS
         }, ContextCompat.getMainExecutor(context))
         onDispose {
             Trace.log("scanner DISPOSED (scan session ending)")
-            capHolder.active = false
             try { capHolder.analysis?.clearAnalyzer() } catch (e: Exception) { }
             try { provider?.unbindAll() } catch (e: Exception) { }
         }
