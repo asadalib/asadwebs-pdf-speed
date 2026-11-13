@@ -21,7 +21,7 @@ Checked against app code 2026-11-08 (native Kotlin app, com.asadwebs.pdfspeed).
 - Star DONE · Rename DONE · Delete DONE · Search TODO · Folders TODO · Tags TODO · Sort TODO
 - Multi-select / Move / Duplicate / Recycle bin — TODO · Cloud sync — TODO
 ## 5. PDF tools
-- Export PDF + share — DONE · In-app PDF viewer — TODO (pages shown as images)
+- Export PDF + share — DONE · In-app PDF viewer — DONE 2026-11-13 (PdfRenderer pager + pinch zoom + share; opens from Tools picker, DocScreen View PDF, and system Open-with)
 - Merge / Split / Reorder / Extract — TODO · Annotate (highlight/draw/text/shapes) — TODO
 - Sign / Watermark / Page numbers — TODO · PDF→Word/Excel/PPT/JPG — TODO · Compress — TODO
 ## 6. Security — TODO (PDF password, app PIN/fingerprint lock)

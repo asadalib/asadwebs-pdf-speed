@@ -50,13 +50,39 @@ import com.asadwebs.pdfspeed.scan.Imaging
 import com.asadwebs.pdfspeed.scan.modeFilter
 import android.graphics.BitmapFactory as BmpFactory
 import com.asadwebs.pdfspeed.ui.*
+import android.provider.OpenableColumns
+import com.asadwebs.pdfspeed.viewer.PdfSource
+import com.asadwebs.pdfspeed.viewer.PdfViewerScreen
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
 class MainActivity : ComponentActivity() {
+    private val externalPdf = mutableStateOf<PdfSource?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleViewIntent(intent)
+    }
+
+    private fun handleViewIntent(intent: Intent?) {
+        val data = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.data ?: return
+        var name = "PDF document"
+        try {
+            contentResolver.query(data, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (i >= 0) name = c.getString(i) ?: name
+                }
+            }
+            contentResolver.takePersistableUriPermission(data, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (e: Exception) { }
+        externalPdf.value = PdfSource.UriStr(data.toString(), name)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleViewIntent(intent)
         Trace.init(applicationContext)
         // Crash capture: write the stack trace to a file so the next launch can
         // show and share it instead of dying silently. Diagnostic aid.
@@ -99,7 +125,7 @@ class MainActivity : ComponentActivity() {
                 }
             } else {
                 PDFSpeedTheme {
-                    Surface(Modifier.fillMaxSize(), color = Cream) { AppRoot() }
+                    Surface(Modifier.fillMaxSize(), color = Cream) { AppRoot(externalPdf.value) { externalPdf.value = null } }
                 }
             }
         }
@@ -107,12 +133,16 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AppRoot() {
+fun AppRoot(externalPdf: PdfSource? = null, onExternalConsumed: () -> Unit = {}) {
     val context = LocalContext.current
     val store = remember { DocStore(context) }
     var docs by remember { mutableStateOf(store.load()) }
     fun refresh() { docs = store.load() }
     var pendingTarget by remember { mutableStateOf("new") }
+    var viewerSource by remember { mutableStateOf<PdfSource?>(null) }
+    LaunchedEffect(externalPdf) {
+        if (externalPdf != null) { viewerSource = externalPdf; onExternalConsumed() }
+    }
     val nav = rememberNavController()
     val route = nav.currentBackStackEntryAsState().value?.destination?.route
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -145,13 +175,13 @@ fun AppRoot() {
         NavHost(navController = nav, startDestination = "home", modifier = Modifier.fillMaxSize()) {
             composable("home") { HomeScreen(docs.firstOrNull(), nav, onScanNew = { launchScanner("new") }) }
             composable("library") { LibraryScreen(docs, store, { refresh() }, nav) }
-            composable("tools") { ToolsScreen(nav, onScanNew = { launchScanner("new") }) }
+            composable("tools") { ToolsScreen(nav, onScanNew = { launchScanner("new") }, onPdfPicked = { uri, name -> viewerSource = PdfSource.UriStr(uri, name) }) }
             composable("me") { MeScreen(docs.size) }
             composable("doc/{docId}") { entry ->
                 val docId = entry.arguments?.getString("docId")
                 val doc = docs.firstOrNull { it.id == docId }
                 if (doc != null) {
-                    DocScreen(doc, store, { refresh() }, nav, onAddPage = { launchScanner(doc.id) })
+                    DocScreen(doc, store, { refresh() }, nav, onAddPage = { launchScanner(doc.id) }, onViewPdf = { f -> viewerSource = PdfSource.Path(f.absolutePath, doc.name) })
                 } else {
                     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
                         Text("This document could not be opened.", style = MaterialTheme.typography.titleLarge)
@@ -166,6 +196,9 @@ fun AppRoot() {
             }
         }
         if (showBar) BottomBar(route, nav, Modifier.align(Alignment.BottomCenter), onScan = { launchScanner("new") })
+        viewerSource?.let { src ->
+            PdfViewerScreen(src, onClose = { viewerSource = null })
+        }
     }
 }
 
@@ -336,7 +369,23 @@ fun LibraryScreen(docs: List<Doc>, store: DocStore, onChanged: () -> Unit, nav: 
 }
 
 @Composable
-fun ToolsScreen(nav: NavController, onScanNew: () -> Unit = {}) {
+fun ToolsScreen(nav: NavController, onScanNew: () -> Unit = {}, onPdfPicked: (String, String) -> Unit = { _, _ -> }) {
+    val toolsContext = LocalContext.current
+    val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            var name = "PDF document"
+            try {
+                toolsContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (i >= 0) name = c.getString(i) ?: name
+                    }
+                }
+                toolsContext.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: Exception) { }
+            onPdfPicked(uri.toString(), name)
+        }
+    }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 120.dp)) {
         item {
             Spacer(Modifier.height(18.dp))
@@ -345,6 +394,7 @@ fun ToolsScreen(nav: NavController, onScanNew: () -> Unit = {}) {
         }
         val sections = listOf(
             "Scanner" to listOf("Scan to PDF" to true),
+            "Read" to listOf("PDF Viewer" to true),
             "Studio" to listOf("PDF Editor" to false),
             "Organize" to listOf("Merge PDF" to false, "Split PDF" to false, "Rotate PDF" to false),
             "Compress" to listOf("Compress PDF" to false),
@@ -354,7 +404,7 @@ fun ToolsScreen(nav: NavController, onScanNew: () -> Unit = {}) {
         sections.forEach { (title, tools) ->
             item { Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 20.dp, bottom = 6.dp)) }
             items(tools) { (name, live) ->
-                Row(Modifier.fillMaxWidth().then(if (live) Modifier.clickable { onScanNew() } else Modifier).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().then(if (live) Modifier.clickable { if (name == "PDF Viewer") pdfPicker.launch(arrayOf("application/pdf")) else onScanNew() } else Modifier).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(name, fontSize = 16.sp, modifier = Modifier.weight(1f), color = if (live) Ink else Muted)
                     if (live) Text("→", color = Muted) else Text("Next update", color = GoldDeep, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
@@ -413,7 +463,7 @@ fun MeScreen(docCount: Int) {
 }
 
 @Composable
-fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavController, onAddPage: () -> Unit = {}) {
+fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavController, onAddPage: () -> Unit = {}, onViewPdf: (java.io.File) -> Unit = {}) {
     val context = LocalContext.current
     var confirmDelete by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), contentPadding = PaddingValues(bottom = 40.dp)) {
@@ -444,16 +494,28 @@ fun DocScreen(doc: Doc, store: DocStore, onChanged: () -> Unit, nav: NavControll
                 Button(onClick = onAddPage, shape = RoundedCornerShape(999.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = GoldInk), modifier = Modifier.weight(1f)) { Text("Add page") }
                 OutlinedButton(onClick = {
-                    val pdf = store.exportPdf(doc)
-                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdf)
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "application/pdf"; putExtra(Intent.EXTRA_STREAM, uri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    context.startActivity(Intent.createChooser(intent, "Share PDF"))
-                }, shape = RoundedCornerShape(999.dp), modifier = Modifier.weight(1f)) { Text("Export PDF") }
+                    Thread {
+                        try {
+                            val pdf = store.exportPdf(doc)
+                            Handler(Looper.getMainLooper()).post { onViewPdf(pdf) }
+                        } catch (e: Exception) {
+                            Handler(Looper.getMainLooper()).post {
+                                Toast.makeText(context, "Could not build the PDF to view.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }.start()
+                }, shape = RoundedCornerShape(999.dp), modifier = Modifier.weight(1f)) { Text("View PDF") }
             }
             Spacer(Modifier.height(10.dp))
+            OutlinedButton(onClick = {
+                val pdf = store.exportPdf(doc)
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdf)
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/pdf"; putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(Intent.createChooser(intent, "Share PDF"))
+            }, shape = RoundedCornerShape(999.dp), modifier = Modifier.fillMaxWidth()) { Text("Export PDF") }
             TextButton(onClick = { confirmDelete = true }) { Text("Delete document", color = Color(0xFFB3352B)) }
         }
     }
