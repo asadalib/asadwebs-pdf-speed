@@ -51,8 +51,9 @@ import java.io.File
  *  export), or a content URI picked by the user / handed over by another
  *  app through "Open with PDF Speed". */
 sealed interface PdfSource {
-    data class Path(val path: String, val title: String) : PdfSource
-    data class UriStr(val uri: String, val title: String) : PdfSource
+    val title: String
+    data class Path(val path: String, override val title: String) : PdfSource
+    data class UriStr(val uri: String, override val title: String) : PdfSource
 }
 
 /** In-app PDF viewer on the framework PdfRenderer — no separate viewer app
